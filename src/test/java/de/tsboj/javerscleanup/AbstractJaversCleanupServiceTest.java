@@ -26,11 +26,11 @@ abstract class AbstractJaversCleanupServiceTest {
     @Autowired Javers javers;
 
     // -------------------------------------------------------------------------
-    // Verhalten 1: Korrekte Anzahl Snapshots wird gelöscht
+    // Behavior 1: correct number of snapshots is deleted
     // -------------------------------------------------------------------------
 
     @Test
-    void keepLatest_loeschtDieAeltestenSnapshots() {
+    void keepLatest_deletesOldestSnapshots() {
         Customer c = createCustomerWithSnapshots(4);
 
         CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(2));
@@ -40,7 +40,7 @@ abstract class AbstractJaversCleanupServiceTest {
     }
 
     @Test
-    void keepLatest_loeschtNichts_wennWenigerAlsMinVorhanden() {
+    void keepLatest_deletesNothing_whenFewerThanMinAvailable() {
         Customer c = createCustomerWithSnapshots(2);
 
         CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(3));
@@ -50,11 +50,11 @@ abstract class AbstractJaversCleanupServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // Verhalten 2: Ältester verbleibender UPDATE-Snapshot wird zu INITIAL befördert
+    // Behavior 2: oldest remaining UPDATE snapshot is promoted to INITIAL
     // -------------------------------------------------------------------------
 
     @Test
-    void cleanup_befoerdertAeltestenVerbleibendenSnapshotZuInitial() {
+    void cleanup_promotesOldestRemainingSnapshotToInitial() {
         Customer c = createCustomerWithSnapshots(4);
 
         cleanupService.cleanup(CleanupPolicy.keepLatest(2));
@@ -64,7 +64,7 @@ abstract class AbstractJaversCleanupServiceTest {
     }
 
     @Test
-    void cleanup_befoerdertNicht_wennAeltesterVerbleibenderBereitsInitial() {
+    void cleanup_doesNotPromote_whenOldestRemainingIsAlreadyInitial() {
         Customer c = createCustomerWithSnapshots(3);
 
         CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(2));
@@ -74,29 +74,29 @@ abstract class AbstractJaversCleanupServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // Verhalten 3: Beförderter Snapshot enthält ALLE Properties
+    // Behavior 3: promoted snapshot contains ALL property names
     // -------------------------------------------------------------------------
 
     @Test
-    void befoerderterInitialSnapshot_enthaeltAlleProperties() {
+    void promotedInitialSnapshot_containsAllProperties() {
         Customer c = repo.save(new Customer("Anna Schmidt", "anna@test.de", "030-1", "Hamburg"));
-        c.setEmail("anna.neu@test.de"); c = repo.save(c);
+        c.setEmail("anna.new@test.de"); c = repo.save(c);
         c.setPhone("030-2");            c = repo.save(c);
 
         cleanupService.cleanup(CleanupPolicy.keepLatest(2));
 
         CdoSnapshot promotedInitial = findOldestSnapshot(c);
         assertThat(promotedInitial.getType()).isEqualTo(SnapshotType.INITIAL);
-        // Javers 7.x tracked auch @Id-Felder als Properties
+        // Javers 7.x also tracks @Id fields as properties
         assertThat(promotedInitial.getChanged())
                 .containsExactlyInAnyOrder("id", "name", "email", "phone", "city");
     }
 
     @Test
-    void befoerderterInitialSnapshot_state_bleibtUnveraendert() {
+    void promotedInitialSnapshot_stateRemainsUnchanged() {
         Customer c = repo.save(new Customer("Bob Bauer", "bob@test.de", "040-1", "Bremen"));
-        c.setCity("Kiel");      c = repo.save(c);
-        c.setCity("Flensburg"); c = repo.save(c);
+        c.setCity("Kiel");       c = repo.save(c);
+        c.setCity("Flensburg");  c = repo.save(c);
 
         cleanupService.cleanup(CleanupPolicy.keepLatest(2));
 
@@ -106,11 +106,11 @@ abstract class AbstractJaversCleanupServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // Verhalten 4: Verwaiste Commits werden bereinigt
+    // Behavior 4: orphaned commits are removed
     // -------------------------------------------------------------------------
 
     @Test
-    void cleanup_entferntVerwaisteCommits() {
+    void cleanup_removesOrphanedCommits() {
         Customer c = createCustomerWithSnapshots(4);
 
         CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(1));
@@ -119,11 +119,11 @@ abstract class AbstractJaversCleanupServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // Verhalten 5: Mehrere Entitäten werden unabhängig bereinigt
+    // Behavior 5: multiple entities are cleaned up independently
     // -------------------------------------------------------------------------
 
     @Test
-    void cleanup_behandeltMehrereEntitaetenUnabhaengig() {
+    void cleanup_handlesMultipleEntitiesIndependently() {
         Customer c1 = createCustomerWithSnapshots(3);
         Customer c2 = createCustomerWithSnapshots(5);
 
@@ -135,13 +135,13 @@ abstract class AbstractJaversCleanupServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // Hilfsmethoden
+    // Helper methods
     // -------------------------------------------------------------------------
 
     private Customer createCustomerWithSnapshots(int snapshotCount) {
         Customer c = repo.save(new Customer("Test User", "test@example.de", "000", "Berlin"));
         for (int i = 1; i < snapshotCount; i++) {
-            c.setCity("Stadt-" + i);
+            c.setCity("City-" + i);
             c = repo.save(c);
         }
         return c;

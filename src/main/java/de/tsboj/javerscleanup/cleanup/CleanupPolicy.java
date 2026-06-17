@@ -4,33 +4,33 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 /**
- * Bestimmt, welche Snapshots bei einem Cleanup-Lauf gelöscht werden dürfen.
+ * Determines which snapshots are eligible for deletion in a cleanup run.
  *
- * @param retentionDays      Snapshots älter als N Tage sind Löschkandidaten (0 = nur count-basiert)
- * @param minSnapshotsToKeep Mindestanzahl der neuesten Snapshots, die pro Entität erhalten bleiben
+ * @param retentionDays      snapshots older than N days are deletion candidates (0 = count-based only)
+ * @param minSnapshotsToKeep minimum number of most-recent snapshots to retain per entity
  */
 public record CleanupPolicy(int retentionDays, int minSnapshotsToKeep) {
 
     public CleanupPolicy {
-        if (minSnapshotsToKeep < 1) throw new IllegalArgumentException("minSnapshotsToKeep muss >= 1 sein");
-        if (retentionDays < 0) throw new IllegalArgumentException("retentionDays muss >= 0 sein");
+        if (minSnapshotsToKeep < 1) throw new IllegalArgumentException("minSnapshotsToKeep must be >= 1");
+        if (retentionDays < 0) throw new IllegalArgumentException("retentionDays must be >= 0");
         if (retentionDays == 0 && minSnapshotsToKeep == Integer.MAX_VALUE)
-            throw new IllegalArgumentException("Policy würde nichts löschen");
+            throw new IllegalArgumentException("policy would delete nothing");
     }
 
-    /** Behält nur die letzten {@code count} Snapshots je Entität. */
+    /** Keeps only the latest {@code count} snapshots per entity. */
     public static CleanupPolicy keepLatest(int count) {
         return new CleanupPolicy(0, count);
     }
 
-    /** Löscht alles älter als {@code days} Tage, behält aber mindestens {@code minKeep} Snapshots. */
+    /** Deletes everything older than {@code days} days, but always keeps at least {@code minKeep} snapshots. */
     public static CleanupPolicy olderThan(int days, int minKeep) {
         return new CleanupPolicy(days, minKeep);
     }
 
     /**
-     * Wählt aus der nach Version aufsteigend sortierten Liste die zu löschenden Snapshot-IDs aus.
-     * Die neuesten {@code minSnapshotsToKeep} Snapshots werden immer behalten.
+     * Selects snapshot IDs to delete from the given list (sorted ascending by version).
+     * The most-recent {@code minSnapshotsToKeep} snapshots are always preserved.
      */
     List<Long> selectForDeletion(List<SnapshotRow> snapshotsSortedAsc) {
         int total = snapshotsSortedAsc.size();
@@ -47,7 +47,7 @@ public record CleanupPolicy(int retentionDays, int minSnapshotsToKeep) {
                     .toList();
         }
 
-        // count-basiert: älteste löschen
+        // count-based: delete oldest
         return snapshotsSortedAsc.subList(0, maxToDelete).stream()
                 .map(SnapshotRow::id)
                 .toList();

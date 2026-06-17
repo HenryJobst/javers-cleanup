@@ -32,13 +32,13 @@ abstract class AbstractJaversMigrationServiceTest {
     @PersistenceContext EntityManager em;
 
     // -------------------------------------------------------------------------
-    // Dokumentation: Javers-Rohverhalten mit orphaned global_id
+    // Documentation: Javers raw behavior with orphaned global_id entries
     // -------------------------------------------------------------------------
 
     @Test
-    void javersRohverhalten_erstelltInitialSnapshot_wennGlobalIdExistiertAberKeineSnapshots() {
-        // Dokumentiert: Javers 7.11.x erstellt korrekt INITIAL wenn jv_global_id
-        // zwar einen Eintrag hat, aber jv_snapshot leer ist (kein Bug in diesem Fall).
+    void javersDefaultBehavior_createsInitialSnapshot_whenGlobalIdExistsButNoSnapshots() {
+        // Documents: Javers 7.11.x correctly creates INITIAL when jv_global_id has an
+        // entry but jv_snapshot is empty for that entity (no bug in this case).
         Customer c = repo.save(new Customer("Raw", "raw@test.de", "000", "Berlin"));
         long globalIdFk = queryGlobalIdFk(c);
         jdbc.update("DELETE FROM jv_snapshot WHERE global_id_fk = ?", globalIdFk);
@@ -50,38 +50,38 @@ abstract class AbstractJaversMigrationServiceTest {
     }
 
     @Test
-    void javersRohverhalten_erstelltUpdateOhneVorherigenInitial_wennInitialGeloeschtAberUpdateBleibt() {
-        // Dokumentiert den echten Problemfall: INITIAL-Snapshot wurde entfernt
-        // (z.B. manuell, oder durch Cleanup ohne Beförderung), danach kommt ein neuer
-        // Commit → Javers erstellt UPDATE, obwohl kein INITIAL in der Kette ist.
+    void javersDefaultBehavior_createsUpdateWithoutPriorInitial_whenInitialDeletedButUpdateRemains() {
+        // Documents the actual problem case: the INITIAL snapshot was removed (e.g.
+        // manually or by a cleanup without promotion) while UPDATE snapshots remain.
+        // A subsequent javers.commit() appends another UPDATE — the chain has no INITIAL.
         Customer c = repo.save(new Customer("Raw2", "raw2@test.de", "000", "Berlin"));
-        c.setCity("München"); c = repo.save(c); // INITIAL(v1), UPDATE(v2)
+        c.setCity("Munich"); c = repo.save(c); // INITIAL(v1), UPDATE(v2)
 
-        // Nur INITIAL löschen, UPDATE(v2) bleibt
+        // Delete only INITIAL, keep UPDATE(v2)
         long initialPk = findOldestSnapshotPk(c);
         jdbc.update("DELETE FROM jv_snapshot WHERE snapshot_pk = ?", initialPk);
         assertThat(findOldestSnapshot(c).getType())
-                .as("Ausgangszustand: nur UPDATE übrig, kein INITIAL")
+                .as("starting state: only UPDATE remains, no INITIAL")
                 .isEqualTo(SnapshotType.UPDATE);
 
-        // Weitere Änderung und direkter Javers-Commit (ohne unsere Korrektur)
+        // Further change and direct Javers commit (without our correction)
         c.setCity("Hamburg");
         em.merge(c); em.flush();
-        javers.commit("raw", c); // erstellt UPDATE(v3)
+        javers.commit("raw", c); // creates UPDATE(v3)
 
-        // Kette ist jetzt: UPDATE(v2), UPDATE(v3) — kein INITIAL!
+        // Chain is now: UPDATE(v2), UPDATE(v3) — no INITIAL
         assertThat(findOldestSnapshot(c).getType())
-                .as("Javers Rohverhalten: ältester Snapshot bleibt UPDATE — fehlerhafte Kette")
+                .as("Javers raw behavior: oldest snapshot remains UPDATE — broken chain")
                 .isEqualTo(SnapshotType.UPDATE);
     }
 
     // -------------------------------------------------------------------------
-    // Verhalten 1: Neue Entität (keinerlei Javers-History) → INITIAL
+    // Behavior 1: new entity (no Javers history at all) → INITIAL
     // -------------------------------------------------------------------------
 
     @Test
-    void commitAll_erstelltInitialSnapshot_fuerNeueEntitaet() {
-        Customer c = saveWithoutAuditing("Neu", "neu@test.de", "000", "Berlin");
+    void commitAll_createsInitialSnapshot_forNewEntity() {
+        Customer c = saveWithoutAuditing("New", "new@test.de", "000", "Berlin");
         assertThat(snapshotCount(c)).isEqualTo(0);
 
         MigrationResult result = migrationService.commitAll(List.of(c), "migration");
@@ -92,42 +92,41 @@ abstract class AbstractJaversMigrationServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // Verhalten 2 (kritisch): INITIAL fehlt, nur UPDATE-Kette vorhanden
-    // → commitAll muss den ältesten UPDATE zu INITIAL befördern
+    // Behavior 2 (critical): INITIAL missing, chain contains only UPDATEs
+    // → commitAll must promote the oldest UPDATE to INITIAL
     // -------------------------------------------------------------------------
 
     @Test
-    void commitAll_befoerdertAeltestenUpdateZuInitial_wennKeinInitialInKette() {
-        Customer c = repo.save(new Customer("Alt", "alt@test.de", "000", "Berlin"));
-        c.setCity("München"); c = repo.save(c); // INITIAL(v1), UPDATE(v2)
+    void commitAll_promotesOldestUpdateToInitial_whenNoInitialInChain() {
+        Customer c = repo.save(new Customer("Existing", "e@test.de", "000", "Berlin"));
+        c.setCity("Munich"); c = repo.save(c); // INITIAL(v1), UPDATE(v2)
 
-        // INITIAL löschen → Kette hat nur UPDATE(v2), kein INITIAL
+        // Delete INITIAL → chain has only UPDATE(v2), no INITIAL
         jdbc.update("DELETE FROM jv_snapshot WHERE snapshot_pk = ?", findOldestSnapshotPk(c));
         assertThat(findOldestSnapshot(c).getType()).isEqualTo(SnapshotType.UPDATE);
 
-        // Migration (kein Auditing)
+        // Migration change (no auditing)
         c.setCity("Hamburg");
         em.merge(c); em.flush();
 
         MigrationResult result = migrationService.commitAll(List.of(c), "migration");
 
-        // JaversMigrationService muss erkennen und korrigieren
         assertThat(result.correctedToInitial()).isEqualTo(1);
         assertThat(findOldestSnapshot(c).getType()).isEqualTo(SnapshotType.INITIAL);
         assertThat(findOldestSnapshot(c).getChanged())
                 .containsExactlyInAnyOrder("id", "name", "email", "phone", "city");
-        // Neuester Snapshot ist UPDATE mit korrektem Diff
+        // newest snapshot is UPDATE with correct diff
         assertThat(findNewestSnapshot(c).getType()).isEqualTo(SnapshotType.UPDATE);
         assertThat(findNewestSnapshot(c).getChanged()).containsExactlyInAnyOrder("city");
     }
 
     // -------------------------------------------------------------------------
-    // Verhalten 3: Bestehende Entität geändert, INITIAL intakt → UPDATE mit Diff
+    // Behavior 3: existing entity changed, INITIAL intact → UPDATE with diff
     // -------------------------------------------------------------------------
 
     @Test
-    void commitAll_erstelltUpdateSnapshot_fuerBestehendeGeaenderteEntitaet() {
-        Customer c = repo.save(new Customer("Bestehend", "b@test.de", "000", "Berlin"));
+    void commitAll_createsUpdateSnapshot_forExistingChangedEntity() {
+        Customer c = repo.save(new Customer("Existing", "b@test.de", "000", "Berlin"));
 
         c.setCity("Frankfurt");
         em.merge(c); em.flush();
@@ -141,12 +140,12 @@ abstract class AbstractJaversMigrationServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // Verhalten 4: Unveränderte Entität → kein neuer Snapshot
+    // Behavior 4: unchanged entity → no new snapshot
     // -------------------------------------------------------------------------
 
     @Test
-    void commitAll_erstelltKeinenSnapshot_fuerUnveraenderteEntitaet() {
-        Customer c = repo.save(new Customer("Gleich", "g@test.de", "000", "Berlin"));
+    void commitAll_createsNoSnapshot_forUnchangedEntity() {
+        Customer c = repo.save(new Customer("Unchanged", "u@test.de", "000", "Berlin"));
 
         MigrationResult result = migrationService.commitAll(List.of(c), "migration");
 
@@ -155,27 +154,27 @@ abstract class AbstractJaversMigrationServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // Verhalten 5: Vollständiger Migrationsablauf
-    // Initiales Einfügen OHNE Javers → retroaktiver Commit → Änderungen MIT Javers
+    // Behavior 5: complete migration flow
+    // Insert WITHOUT Javers → retroactive commitAll → modify WITH Javers
     // -------------------------------------------------------------------------
 
     @Test
-    void vollstaendigerAblauf_insertOhneJavers_commitAll_dannAendernMitJavers() {
-        // Schritt 1: Daten initial OHNE Javers einfügen (Migration mit deaktiviertem Auditing)
+    void fullMigrationFlow_insertWithoutJavers_commitAll_thenModifyWithJavers() {
+        // Step 1: insert data WITHOUT Javers (migration with auditing disabled)
         Customer c = saveWithoutAuditing("Migration", "mig@test.de", "000", "Berlin");
-        assertThat(snapshotCount(c)).as("kein Snapshot nach Insert ohne Javers").isEqualTo(0);
+        assertThat(snapshotCount(c)).as("no snapshot after insert without Javers").isEqualTo(0);
 
-        // Schritt 2: retroaktiver INITIAL-Snapshot für den Ausgangszustand
+        // Step 2: retroactive INITIAL snapshot for the original state
         MigrationResult result = migrationService.commitAll(List.of(c), "data-migration");
         assertThat(result.newInitialSnapshots()).isEqualTo(1);
         assertThat(findOldestSnapshot(c).getType()).isEqualTo(SnapshotType.INITIAL);
         assertThat(findOldestSnapshot(c).getState().getPropertyValue("city")).isEqualTo("Berlin");
 
-        // Schritt 3: normale Änderung MIT Javers (normaler Betrieb nach Migration)
-        c.setCity("München");
+        // Step 3: normal change WITH Javers (regular operation after migration)
+        c.setCity("Munich");
         c = repo.save(c);
 
-        // Kette muss vollständig sein: INITIAL (Ausgangszustand) → UPDATE (Änderung)
+        // Chain must be complete: INITIAL (original state) → UPDATE (change)
         assertThat(snapshotCount(c)).isEqualTo(2);
         assertThat(findOldestSnapshot(c).getType()).isEqualTo(SnapshotType.INITIAL);
         assertThat(findNewestSnapshot(c).getType()).isEqualTo(SnapshotType.UPDATE);
@@ -183,28 +182,28 @@ abstract class AbstractJaversMigrationServiceTest {
     }
 
     @Test
-    void ohneRETroaktivenCommit_hatInitialSnapshotFalschemZustand() {
-        // Anti-Pattern: Änderung mit Javers OHNE vorherigen retroaktiven commitAll.
-        // Javers erstellt zwar INITIAL (da kein Snapshot existiert), aber dieser
-        // enthält den POST-Change-Zustand — der Original-Einfüge-Zustand geht verloren.
-        Customer c = saveWithoutAuditing("Verloren", "v@test.de", "000", "Berlin");
+    void withoutRetroactiveCommit_initialSnapshotHasWrongState() {
+        // Anti-pattern: changing an entity with Javers WITHOUT calling commitAll first.
+        // Javers creates INITIAL (no prior snapshot exists) but it captures the
+        // POST-change state — the original insertion state is permanently lost.
+        Customer c = saveWithoutAuditing("Lost", "lost@test.de", "000", "Berlin");
 
-        c.setCity("München");
-        c = repo.save(c); // Javers: kein Vorsnapshot → erstellt INITIAL mit München
+        c.setCity("Munich");
+        c = repo.save(c); // Javers: no prior snapshot → creates INITIAL with Munich
 
         assertThat(findOldestSnapshot(c).getType()).isEqualTo(SnapshotType.INITIAL);
-        // INITIAL hat den geänderten Zustand (München), nicht den Originalzustand (Berlin)
-        assertThat(findOldestSnapshot(c).getState().getPropertyValue("city")).isEqualTo("München");
-        // → Lösung: migrationService.commitAll() VOR der ersten Javers-Änderung aufrufen
+        // INITIAL has the changed state (Munich), not the original state (Berlin)
+        assertThat(findOldestSnapshot(c).getState().getPropertyValue("city")).isEqualTo("Munich");
+        // → solution: call migrationService.commitAll() BEFORE the first Javers-enabled change
     }
 
     // -------------------------------------------------------------------------
-    // Verhalten 6: Backdating — historischer Migrationszeitstempel
+    // Behavior 6: backdating — historical migration timestamp
     // -------------------------------------------------------------------------
 
     @Test
-    void commitAllAt_setztHistorischenZeitstempel() {
-        Customer c = saveWithoutAuditing("Historisch", "h@test.de", "000", "Berlin");
+    void commitAllAt_setsHistoricalTimestamp() {
+        Customer c = saveWithoutAuditing("Historical", "h@test.de", "000", "Berlin");
         Instant migrationTime = Instant.now().minus(7, ChronoUnit.DAYS).truncatedTo(ChronoUnit.SECONDS);
 
         migrationService.commitAllAt(List.of(c), "migration", migrationTime);
@@ -226,7 +225,7 @@ abstract class AbstractJaversMigrationServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // Hilfsmethoden
+    // Helper methods
     // -------------------------------------------------------------------------
 
     private Customer saveWithoutAuditing(String name, String email, String phone, String city) {

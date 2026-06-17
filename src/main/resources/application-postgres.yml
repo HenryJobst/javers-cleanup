@@ -1,6 +1,6 @@
 spring:
   datasource:
-    # URL/Credentials werden von Testcontainers @ServiceConnection injiziert
+    # URL/credentials are injected by Testcontainers @ServiceConnection
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:

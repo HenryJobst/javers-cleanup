@@ -30,33 +30,33 @@ public class DemoRunner implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
-        // Kunde anlegen und mehrfach ändern → 5 Snapshots
+        // Create a customer and modify it four times → 5 snapshots
         Customer c = repo.save(new Customer("Max Mustermann", "max@example.de", "030-100", "Berlin"));
-        c.setEmail("max.neu@example.de");   c = repo.save(c);   // v2: email geändert
-        c.setPhone("030-200");              c = repo.save(c);   // v3: phone geändert
-        c.setCity("München");               c = repo.save(c);   // v4: city geändert
-        c.setName("Maximilian Mustermann"); c = repo.save(c);   // v5: name geändert
+        c.setEmail("max.new@example.de");     c = repo.save(c); // v2: email changed
+        c.setPhone("030-200");                c = repo.save(c); // v3: phone changed
+        c.setCity("Munich");                  c = repo.save(c); // v4: city changed
+        c.setName("Maximilian Mustermann");   c = repo.save(c); // v5: name changed
 
-        printSnapshots("VOR Cleanup", c);
+        printSnapshots("BEFORE cleanup", c);
 
-        // Policy: nur die letzten 2 Snapshots behalten
+        // Policy: keep only the last 2 snapshots
         CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(2));
-        System.out.println("\n=== Cleanup-Ergebnis ===");
+        System.out.println("\n=== Cleanup result ===");
         System.out.println("  " + result);
 
-        printSnapshots("NACH Cleanup (keepLatest=2)", c);
+        printSnapshots("AFTER cleanup (keepLatest=2)", c);
 
-        // Zweiter Kunde: Zeit-basierte Policy demonstrieren
-        // (im Demo sofort gelöscht, da alle Snapshots "jetzt" sind → minKeep=1 greift)
+        // Second customer: demonstrate time-based policy
+        // (nothing deleted in demo since all snapshots were just created — minKeep=1 applies)
         Customer c2 = repo.save(new Customer("Erika Muster", "erika@example.de", "089-100", "Hamburg"));
         c2.setCity("Frankfurt"); c2 = repo.save(c2);
-        c2.setCity("Köln");      c2 = repo.save(c2);
+        c2.setCity("Cologne");   c2 = repo.save(c2);
 
-        printSnapshots("Kunde 2 VOR Cleanup", c2);
+        printSnapshots("Customer 2 BEFORE cleanup", c2);
 
         CleanupResult result2 = cleanupService.cleanup(CleanupPolicy.olderThan(30, 1));
-        System.out.println("\n=== Cleanup-Ergebnis (olderThan 30 Tage, min 1) ===");
-        System.out.println("  " + result2 + "  (keine Löschung, da Snapshots < 30 Tage alt)");
+        System.out.println("\n=== Cleanup result (olderThan 30 days, min 1) ===");
+        System.out.println("  " + result2 + "  (nothing deleted — snapshots are < 30 days old)");
     }
 
     private void printSnapshots(String label, Customer c) {

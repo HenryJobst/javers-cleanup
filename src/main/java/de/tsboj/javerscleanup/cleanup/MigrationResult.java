@@ -1,11 +1,11 @@
 package de.tsboj.javerscleanup.cleanup;
 
 /**
- * @param newInitialSnapshots   Neu erstellte INITIAL-Snapshots (neue Entitäten)
- * @param newUpdateSnapshots    Neu erstellte UPDATE-Snapshots (bestehende geänderte Entitäten)
- * @param unchangedEntities     Entitäten ohne Zustandsänderung → kein neuer Snapshot
- * @param correctedToInitial    UPDATE-Snapshots die nachträglich zu INITIAL korrigiert wurden
- *                              (tritt auf wenn jv_global_id existiert, aber keine Snapshots)
+ * @param newInitialSnapshots  newly created INITIAL snapshots (new entities)
+ * @param newUpdateSnapshots   newly created UPDATE snapshots (existing entities that changed)
+ * @param unchangedEntities    entities with no state change — no new snapshot created
+ * @param correctedToInitial   UPDATE snapshots retroactively converted to INITIAL
+ *                             (occurs when jv_global_id exists but no snapshots remain)
  */
 public record MigrationResult(
         int newInitialSnapshots,
@@ -15,7 +15,7 @@ public record MigrationResult(
 ) {
     @Override
     public String toString() {
-        return ("MigrationResult{newInitial=%d, newUpdate=%d, unchanged=%d, correctedToInitial=%d}")
+        return "MigrationResult{newInitial=%d, newUpdate=%d, unchanged=%d, correctedToInitial=%d}"
                 .formatted(newInitialSnapshots, newUpdateSnapshots, unchangedEntities, correctedToInitial);
     }
 }

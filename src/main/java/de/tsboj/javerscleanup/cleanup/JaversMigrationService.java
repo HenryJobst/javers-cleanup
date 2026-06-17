@@ -18,22 +18,22 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * Erstellt retroaktiv Javers-Snapshots für Entitäten, die während einer Migration
- * ohne Javers-Auditing angelegt oder geändert wurden.
+ * Retroactively creates Javers snapshots for entities that were inserted or modified
+ * during a migration run with Javers auditing disabled.
  *
- * <h3>Problemfall: fehlender INITIAL-Snapshot</h3>
- * Wurde der INITIAL-Snapshot einer Entität gelöscht (z.B. durch ein vorheriges Cleanup
- * ohne korrekte Beförderung), besteht die Kette nur noch aus UPDATE-Snapshots.
- * Ein nachträglicher {@code javers.commit()} würde einen weiteren UPDATE anhängen —
- * ohne dass je ein INITIAL existiert. Dieser Service erkennt und korrigiert diesen
- * Zustand automatisch nach dem Commit.
+ * <h3>The missing INITIAL problem</h3>
+ * If the INITIAL snapshot of an entity was deleted (e.g. by a previous cleanup without
+ * proper promotion), the chain consists only of UPDATE snapshots. A subsequent
+ * {@code javers.commit()} would append another UPDATE, leaving the chain without any
+ * INITIAL snapshot. This service detects and corrects that state automatically after
+ * each commit batch.
  *
- * <h3>Typen</h3>
+ * <h3>Snapshot types created</h3>
  * <ul>
- *   <li>Neue Entität (kein Snapshot) → INITIAL</li>
- *   <li>Bestehende Entität geändert (INITIAL vorhanden) → UPDATE mit Diff</li>
- *   <li>Bestehende Entität, INITIAL fehlt → UPDATE + Korrektur des ältesten zu INITIAL</li>
- *   <li>Unveränderte Entität → kein neuer Snapshot</li>
+ *   <li>New entity (no snapshot) → INITIAL</li>
+ *   <li>Existing entity changed (INITIAL present) → UPDATE with diff</li>
+ *   <li>Existing entity, INITIAL missing → UPDATE + oldest UPDATE corrected to INITIAL</li>
+ *   <li>Unchanged entity → no new snapshot</li>
  * </ul>
  */
 @Service
@@ -53,7 +53,7 @@ public class JaversMigrationService {
     }
 
     /**
-     * Erstellt retroaktiv Snapshots mit dem aktuellen Zeitstempel.
+     * Retroactively creates snapshots using the current timestamp.
      */
     @Transactional
     public <T> MigrationResult commitAll(Collection<T> entities, String author) {
@@ -61,9 +61,10 @@ public class JaversMigrationService {
     }
 
     /**
-     * Erstellt retroaktiv Snapshots mit einem historischen Migrationszeitstempel.
-     * Nützlich um die Snapshots zeitlich korrekt in der Audit-Historie einzuordnen.
-     * Javers bietet dafür kein Public-API; die Anpassung erfolgt direkt in {@code jv_commit}.
+     * Retroactively creates snapshots with a historical migration timestamp.
+     * Useful for placing snapshots at the correct point in the audit timeline.
+     * Javers provides no public API for this; the timestamp is applied directly
+     * to {@code jv_commit} after the commit.
      */
     @Transactional
     public <T> MigrationResult commitAllAt(Collection<T> entities, String author,
@@ -82,7 +83,7 @@ public class JaversMigrationService {
             javers.commit(author, entity);
         }
 
-        // Korrektur: ältester Snapshot ist UPDATE ohne vorherigen INITIAL → zu INITIAL befördern
+        // Fix: oldest snapshot is UPDATE without a prior INITIAL → promote to INITIAL
         int corrected = promoteOrphanedOldestUpdates(maxSnapshotPkBefore);
 
         if (migrationTimestamp != null) {
@@ -93,16 +94,14 @@ public class JaversMigrationService {
     }
 
     /**
-     * Findet Entitäten, bei denen nach dem Commit der ÄLTESTE Snapshot vom Typ UPDATE ist
-     * (kein INITIAL in der gesamten Kette). Dies passiert wenn ein früheres INITIAL
-     * gelöscht wurde ohne Beförderung eines anderen Snapshots.
+     * Finds entities where, after the commit, the absolute oldest snapshot has type UPDATE
+     * (no INITIAL anywhere in the chain). This happens when a prior INITIAL was deleted
+     * without promoting another snapshot to take its place.
      *
-     * <p>Die Suche beschränkt sich auf Entitäten, die in diesem Lauf tatsächlich
-     * committet wurden (neue snapshot_pk > maxBefore).
+     * <p>The search is scoped to entities that actually received a new snapshot in this run
+     * (snapshot_pk > maxBefore).
      */
     private int promoteOrphanedOldestUpdates(long maxSnapshotPkBefore) {
-        // Für alle global_ids, die in diesem Lauf neue Snapshots bekommen haben:
-        // Finde den jeweils ÄLTESTEN Snapshot — wenn der UPDATE ist, muss er zu INITIAL befördert werden.
         List<SnapshotRow> toPromote = jdbc.query("""
                 SELECT s.snapshot_pk, s.version, s.type, s.changed_properties, s.commit_fk,
                        c.commit_date, g.type_name, g.local_id
@@ -136,8 +135,8 @@ public class JaversMigrationService {
         }
 
         if (!toPromote.isEmpty()) {
-            log.warn("{} Snapshot(s) ohne vorherigen INITIAL gefunden und korrigiert " +
-                     "(ältester Snapshot war UPDATE — fehlende INITIAL-Beförderung in früherem Cleanup?)",
+            log.warn("{} snapshot(s) found without a prior INITIAL and corrected " +
+                     "(oldest snapshot was UPDATE — missing INITIAL promotion in a previous cleanup?)",
                     toPromote.size());
         }
 
@@ -154,7 +153,7 @@ public class JaversMigrationService {
                 "UPDATE jv_snapshot SET type = 'INITIAL', changed_properties = ? WHERE snapshot_pk = ?",
                 allPropertiesJson, snapshot.id());
 
-        log.debug("Snapshot {} (v{}) nachträglich zu INITIAL befördert", snapshot.id(), snapshot.version());
+        log.debug("Snapshot {} (v{}) retroactively promoted to INITIAL", snapshot.id(), snapshot.version());
     }
 
     @SuppressWarnings("unchecked")
@@ -168,10 +167,10 @@ public class JaversMigrationService {
                     .findFirst()
                     .map(s -> s.getState().getPropertyNames())
                     .orElseThrow(() -> new IllegalStateException(
-                            "Snapshot v%d für %s/%s nicht in Javers gefunden"
+                            "Snapshot v%d for %s/%s not found in Javers"
                                     .formatted(row.version(), row.typeName(), row.localId())));
         } catch (ClassNotFoundException e) {
-            throw new IllegalStateException("Entity-Klasse nicht gefunden: " + row.typeName(), e);
+            throw new IllegalStateException("Entity class not found: " + row.typeName(), e);
         }
     }
 

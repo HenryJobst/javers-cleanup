@@ -14,19 +14,19 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * Bereinigt veraltete Javers-Snapshots und stellt dabei die Konsistenz der Audit-Historie sicher.
+ * Removes outdated Javers snapshots while preserving audit-history consistency.
  *
- * <p>Das zentrale Problem bei Javers-Cleanup: Snapshots vom Typ UPDATE speichern in
- * {@code changed_properties} nur die geänderten Felder. Ein INITIAL-Snapshot hingegen
- * enthält alle Felder. Wenn der ursprüngliche INITIAL-Snapshot gelöscht wird, muss der
- * älteste verbleibende Snapshot korrekt zu INITIAL befördert werden:
+ * <p>The core challenge: UPDATE snapshots store only the changed property names in
+ * {@code changed_properties}, whereas an INITIAL snapshot must list all properties.
+ * When the original INITIAL snapshot is deleted, the oldest remaining snapshot must
+ * be promoted correctly:
  * <ul>
  *   <li>{@code type} → {@code INITIAL}</li>
- *   <li>{@code changed_properties} → alle Property-Namen aus dem {@code state}-JSON</li>
+ *   <li>{@code changed_properties} → all property names from {@code state}</li>
  * </ul>
- * Der {@code state} selbst ist immer vollständig (kein Delta) und muss nicht angepasst werden.
- * Die Property-Namen werden direkt über die Javers-API aus dem {@code CdoSnapshot.getState()}
- * gelesen, ohne Abhängigkeit auf eine separate JSON-Bibliothek.
+ * The {@code state} column always holds the complete object state (no delta) and
+ * does not need to be modified. Property names are read via the Javers
+ * {@code CdoSnapshot} API to avoid a direct Jackson dependency.
  */
 @Service
 public class JaversCleanupService {
@@ -46,9 +46,9 @@ public class JaversCleanupService {
     }
 
     /**
-     * Führt einen Cleanup-Lauf gemäß der übergebenen Policy durch.
+     * Runs a cleanup pass according to the given policy.
      *
-     * @return Zusammenfassung der vorgenommenen Änderungen
+     * @return summary of all changes made
      */
     @Transactional
     public CleanupResult cleanup(CleanupPolicy policy) {
@@ -66,12 +66,12 @@ public class JaversCleanupService {
             Set<Long> toDeleteSet = new HashSet<>(toDelete);
             List<SnapshotRow> remaining = snapshots.stream()
                     .filter(s -> !toDeleteSet.contains(s.id()))
-                    .toList(); // bereits aufsteigend nach Version sortiert
+                    .toList(); // already sorted ascending by version
 
             if (!remaining.isEmpty()) {
                 SnapshotRow oldestRemaining = remaining.getFirst();
-                // Nur UPDATE-Snapshots müssen befördert werden; INITIAL ist bereits korrekt,
-                // TERMINAL würde auf eine gelöschte Entität hinweisen (kein sinnvoller INITIAL).
+                // Only UPDATE snapshots need promotion; INITIAL is already correct,
+                // TERMINAL indicates a deleted entity and should not become INITIAL.
                 if ("UPDATE".equals(oldestRemaining.type())) {
                     promoteToInitial(oldestRemaining);
                     promoted++;
@@ -82,19 +82,17 @@ public class JaversCleanupService {
                     Map.of("ids", toDelete));
             deleted += toDelete.size();
 
-            log.debug("GlobalId {}: {} Snapshots gelöscht", globalId, toDelete.size());
+            log.debug("GlobalId {}: {} snapshot(s) deleted", globalId, toDelete.size());
         }
 
         int deletedCommits = cleanupOrphanedData();
 
-        log.info("Cleanup abgeschlossen: {} befördert, {} Snapshots gelöscht, {} Commits gelöscht",
+        log.info("Cleanup complete: {} promoted, {} snapshots deleted, {} commits deleted",
                 promoted, deleted, deletedCommits);
 
         return new CleanupResult(promoted, deleted, deletedCommits, 0);
     }
 
-    // -------------------------------------------------------------------------
-    // Interne Hilfsmethoden
     // -------------------------------------------------------------------------
 
     private List<SnapshotRow> loadSnapshots(long globalId) {
@@ -121,17 +119,16 @@ public class JaversCleanupService {
     }
 
     /**
-     * Befördert einen UPDATE-Snapshot zum INITIAL-Snapshot.
+     * Promotes an UPDATE snapshot to INITIAL.
      *
-     * <p>Property-Namen werden über die Javers-API aus dem {@code CdoSnapshotState}
-     * gelesen — der {@code state}-JSON enthält bereits den vollständigen Objektzustand
-     * und muss nicht verändert werden. Lediglich {@code type} und {@code changed_properties}
-     * werden korrigiert.
+     * <p>The {@code state} column already contains the full object state and is left
+     * unchanged. Only {@code type} and {@code changed_properties} are updated so that
+     * Javers interprets this snapshot as a complete initial creation.
      */
     private void promoteToInitial(SnapshotRow snapshot) {
         Set<String> allPropertyNames = loadPropertyNamesFromJavers(snapshot);
-        // Java-Identifier-Namen enthalten keine Anführungszeichen oder Backslashes,
-        // daher ist dieses manuelle JSON-Array-Format korrekt und sicher.
+        // Java identifier names contain no quotes or backslashes, so this manual
+        // JSON array format is correct and safe.
         String allPropertiesJson = allPropertyNames.stream()
                 .map(name -> "\"" + name + "\"")
                 .collect(Collectors.joining(",", "[", "]"));
@@ -140,14 +137,13 @@ public class JaversCleanupService {
                 "UPDATE jv_snapshot SET type = 'INITIAL', changed_properties = ? WHERE snapshot_pk = ?",
                 allPropertiesJson, snapshot.id());
 
-        log.debug("Snapshot {} (v{}) zu INITIAL befördert, changed_properties={}",
-                snapshot.id(), snapshot.version(), allPropertiesJson);
+        log.debug("Snapshot {} (v{}) promoted to INITIAL", snapshot.id(), snapshot.version());
     }
 
     /**
-     * Lädt alle Property-Namen des Snapshots über die Javers-API.
-     * Verwendet {@code CdoSnapshotState.getPropertyNames()}, um unabhängig von
-     * der konkreten JSON-Bibliothek (Jackson 2/3) zu bleiben.
+     * Reads all property names for the given snapshot via the Javers API.
+     * Uses {@code CdoSnapshotState.getPropertyNames()} to stay independent of
+     * the concrete JSON library (Jackson 2/3).
      */
     @SuppressWarnings("unchecked")
     private Set<String> loadPropertyNamesFromJavers(SnapshotRow row) {
@@ -160,53 +156,45 @@ public class JaversCleanupService {
                     .findFirst()
                     .map(s -> s.getState().getPropertyNames())
                     .orElseThrow(() -> new IllegalStateException(
-                            "Snapshot v%d für %s/%s in Javers nicht gefunden"
+                            "Snapshot v%d for %s/%s not found in Javers"
                                     .formatted(row.version(), row.typeName(), row.localId())));
         } catch (ClassNotFoundException e) {
-            throw new IllegalStateException(
-                    "Entity-Klasse nicht gefunden: " + row.typeName(), e);
-        }
-    }
-
-    /** Javers speichert die local_id als String; meistens ist es eine Long-Zahl. */
-    private static Object parseLocalId(String localId) {
-        try {
-            return Long.parseLong(localId);
-        } catch (NumberFormatException e) {
-            return localId;
+            throw new IllegalStateException("Entity class not found: " + row.typeName(), e);
         }
     }
 
     /**
-     * Bereinigt verwaiste Datensätze in der richtigen Reihenfolge (FK-Constraints beachten):
-     * zuerst jv_commit_property, dann jv_commit, dann jv_global_id.
+     * Removes orphaned data in FK-safe order:
+     * jv_commit_property → jv_commit → jv_global_id (children first, then parents).
      */
     private int cleanupOrphanedData() {
-        // Commit-Properties für verwaiste Commits löschen
         jdbc.update("""
                 DELETE FROM jv_commit_property
                 WHERE commit_fk NOT IN (SELECT DISTINCT commit_fk FROM jv_snapshot)
                 """);
 
-        // Verwaiste Commits löschen
         int deletedCommits = jdbc.update("""
                 DELETE FROM jv_commit
                 WHERE commit_pk NOT IN (SELECT DISTINCT commit_fk FROM jv_snapshot)
                 """);
 
-        // Verwaiste Kind-GlobalIds löschen (ValueObjects)
+        // Delete orphaned child global IDs (value objects) first
         jdbc.update("""
                 DELETE FROM jv_global_id
                 WHERE owner_id_fk IS NOT NULL
                   AND global_id_pk NOT IN (SELECT DISTINCT global_id_fk FROM jv_snapshot)
                 """);
 
-        // Verwaiste Eltern-GlobalIds löschen
         jdbc.update("""
                 DELETE FROM jv_global_id
                 WHERE global_id_pk NOT IN (SELECT DISTINCT global_id_fk FROM jv_snapshot)
                 """);
 
         return deletedCommits;
+    }
+
+    private static Object parseLocalId(String localId) {
+        try { return Long.parseLong(localId); }
+        catch (NumberFormatException e) { return localId; }
     }
 }

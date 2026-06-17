@@ -8,7 +8,7 @@ public record CleanupResult(
 ) {
     @Override
     public String toString() {
-        return "CleanupResult{befördert=%d, gelöschteSnapshots=%d, gelöschteCommits=%d, gelöschteGlobalIds=%d}"
+        return "CleanupResult{promoted=%d, deletedSnapshots=%d, deletedCommits=%d, deletedGlobalIds=%d}"
                 .formatted(promotedSnapshots, deletedSnapshots, deletedCommits, deletedGlobalIds);
     }
 }

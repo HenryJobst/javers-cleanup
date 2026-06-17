@@ -2,8 +2,8 @@ package de.tsboj.javerscleanup;
 
 import de.tsboj.javerscleanup.cleanup.JaversMigrationService;
 import de.tsboj.javerscleanup.cleanup.MigrationResult;
-import de.tsboj.javerscleanup.demo.Customer;
-import de.tsboj.javerscleanup.demo.CustomerRepository;
+import de.tsboj.javerscleanup.demo.*;
+
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import org.javers.core.Javers;
@@ -16,6 +16,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
 import java.util.List;
@@ -26,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 abstract class AbstractJaversMigrationServiceTest {
 
     @Autowired CustomerRepository repo;
+    @Autowired ContractRepository contractRepo;
     @Autowired JaversMigrationService migrationService;
     @Autowired Javers javers;
     @Autowired JdbcTemplate jdbc;
@@ -198,7 +200,37 @@ abstract class AbstractJaversMigrationServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // Behavior 6: backdating — historical migration timestamp
+    // Behavior 6: Value Objects (embedded entities with own jv_global_id entries)
+    // -------------------------------------------------------------------------
+
+    @Test
+    void commitAll_createsInitialSnapshot_forNewEntityWithValueObject() {
+        // Entity with embedded VO (ContractPeriod) saved without auditing.
+        // javers.commit() must create INITIAL for both the entity and its VO.
+        Contract c = new Contract("New Contract",
+                new ContractPeriod(LocalDate.of(2024, 1, 1), LocalDate.of(2024, 12, 31)));
+        em.persist(c);
+        em.flush();
+
+        MigrationResult result = migrationService.commitAll(List.of(c), "migration");
+
+        assertThat(result.newInitialSnapshots()).isGreaterThanOrEqualTo(1);
+
+        // Entity snapshot
+        List<CdoSnapshot> entitySnapshots = javers.findSnapshots(
+                QueryBuilder.byInstance(c).build());
+        assertThat(entitySnapshots).isNotEmpty();
+        assertThat(entitySnapshots.getFirst().getType()).isEqualTo(SnapshotType.INITIAL);
+
+        // Value Object snapshot — Javers 7.11.x stores fragment without leading slash
+        List<CdoSnapshot> voSnapshots = javers.findSnapshots(
+                QueryBuilder.byValueObjectId(c.getId(), Contract.class, "period").build());
+        assertThat(voSnapshots).isNotEmpty();
+        assertThat(voSnapshots.getFirst().getType()).isEqualTo(SnapshotType.INITIAL);
+    }
+
+    // -------------------------------------------------------------------------
+    // Behavior 7: backdating — historical migration timestamp
     // -------------------------------------------------------------------------
 
     @Test

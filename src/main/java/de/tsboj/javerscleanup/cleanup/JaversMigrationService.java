@@ -104,10 +104,12 @@ public class JaversMigrationService {
     private int promoteOrphanedOldestUpdates(long maxSnapshotPkBefore) {
         List<SnapshotRow> toPromote = jdbc.query("""
                 SELECT s.snapshot_pk, s.version, s.type, s.changed_properties, s.commit_fk,
-                       c.commit_date, g.type_name, g.local_id
+                       c.commit_date, g.type_name, g.local_id, g.fragment,
+                       og.type_name AS owner_type_name, og.local_id AS owner_local_id
                 FROM jv_snapshot s
                 JOIN jv_commit c ON s.commit_fk = c.commit_pk
                 JOIN jv_global_id g ON s.global_id_fk = g.global_id_pk
+                LEFT JOIN jv_global_id og ON g.owner_id_fk = og.global_id_pk
                 WHERE s.global_id_fk IN (
                     SELECT DISTINCT global_id_fk FROM jv_snapshot WHERE snapshot_pk > ?
                 )
@@ -126,7 +128,10 @@ public class JaversMigrationService {
                         rs.getLong("commit_fk"),
                         rs.getTimestamp("commit_date").toLocalDateTime(),
                         rs.getString("type_name"),
-                        rs.getString("local_id")
+                        rs.getString("local_id"),
+                        rs.getString("fragment"),
+                        rs.getString("owner_type_name"),
+                        rs.getString("owner_local_id")
                 ),
                 maxSnapshotPkBefore);
 
@@ -159,18 +164,28 @@ public class JaversMigrationService {
     @SuppressWarnings("unchecked")
     private Set<String> loadPropertyNamesFromJavers(SnapshotRow row) {
         try {
-            Class<?> entityClass = Class.forName(row.typeName());
-            List<CdoSnapshot> snapshots = javers.findSnapshots(
-                    QueryBuilder.byInstanceId(parseLocalId(row.localId()), entityClass).build());
+            List<CdoSnapshot> snapshots;
+            if (row.isValueObject()) {
+                Class<?> ownerClass = Class.forName(row.ownerTypeName());
+                snapshots = javers.findSnapshots(
+                        QueryBuilder.byValueObjectId(
+                                parseLocalId(row.ownerLocalId()), ownerClass, row.fragment()
+                        ).build());
+            } else {
+                Class<?> entityClass = Class.forName(row.typeName());
+                snapshots = javers.findSnapshots(
+                        QueryBuilder.byInstanceId(parseLocalId(row.localId()), entityClass).build());
+            }
             return snapshots.stream()
                     .filter(s -> s.getVersion() == row.version())
                     .findFirst()
                     .map(s -> s.getState().getPropertyNames())
                     .orElseThrow(() -> new IllegalStateException(
-                            "Snapshot v%d for %s/%s not found in Javers"
-                                    .formatted(row.version(), row.typeName(), row.localId())));
+                            "Snapshot v%d for %s (fragment=%s) not found in Javers"
+                                    .formatted(row.version(), row.typeName(), row.fragment())));
         } catch (ClassNotFoundException e) {
-            throw new IllegalStateException("Entity class not found: " + row.typeName(), e);
+            throw new IllegalStateException(
+                    "Class not found: " + (row.isValueObject() ? row.ownerTypeName() : row.typeName()), e);
         }
     }
 

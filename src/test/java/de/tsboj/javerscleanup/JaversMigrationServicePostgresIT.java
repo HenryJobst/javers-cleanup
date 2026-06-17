@@ -10,7 +10,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @SpringBootTest
 @ActiveProfiles({"test", "postgres"})
 @Testcontainers
-class JaversCleanupServicePostgresIT extends AbstractJaversCleanupServiceTest {
+class JaversMigrationServicePostgresIT extends AbstractJaversMigrationServiceTest {
 
     @Container
     @ServiceConnection

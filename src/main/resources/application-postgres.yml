@@ -1,0 +1,10 @@
+spring:
+  datasource:
+    # URL/Credentials werden von Testcontainers @ServiceConnection injiziert
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  h2:
+    console:
+      enabled: false

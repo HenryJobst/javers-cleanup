@@ -50,7 +50,7 @@
         <connection>scm:git:git://github.com/henryjobst/javers-cleanup.git</connection>
         <developerConnection>scm:git:ssh://github.com/henryjobst/javers-cleanup.git</developerConnection>
         <url>https://github.com/henryjobst/javers-cleanup</url>
-        <tag>HEAD</tag>
+        <tag>v0.1.0</tag>
     </scm>
 
     <build>

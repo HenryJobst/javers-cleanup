@@ -4,6 +4,8 @@ import de.tsboj.javerscleanup.cleanup.CleanupPolicy;
 import de.tsboj.javerscleanup.cleanup.CleanupResult;
 import de.tsboj.javerscleanup.cleanup.JaversCleanupService;
 import de.tsboj.javerscleanup.demo.*;
+import de.tsboj.javerscleanup.demo.Tag;
+import de.tsboj.javerscleanup.demo.TagRepository;
 import org.javers.core.Javers;
 import org.javers.core.diff.Change;
 import org.javers.core.diff.changetype.InitialValueChange;
@@ -30,6 +32,7 @@ abstract class AbstractJaversCleanupServiceTest {
     @Autowired CustomerRepository repo;
     @Autowired ContractRepository contractRepo;
     @Autowired OrderRepository orderRepo;
+    @Autowired TagRepository tagRepo;
     @Autowired JaversCleanupService cleanupService;
     @Autowired Javers javers;
     @Autowired org.springframework.jdbc.core.JdbcTemplate jdbc;
@@ -387,6 +390,64 @@ abstract class AbstractJaversCleanupServiceTest {
                 () -> cleanupService.cleanup(CleanupPolicy.keepLatest(1)));
 
         assertThat(snapshotCount(customer)).isEqualTo(1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Behavior 7b: reference protection extends to entity refs inside VO state
+    // -------------------------------------------------------------------------
+
+    @Test
+    void reference_protection_rescues_anchor_snapshot_referenced_from_retained_vo_state() {
+        // ContractPeriod (a Javers Value Object) has a @ManyToOne Customer reference.
+        // Phase 2 must scan VO snapshot state — not only entity snapshots — to detect
+        // this reference and rescue the Customer anchor snapshot via Phase 3.
+        //
+        // Timeline: customer.v1 → Contract+VO committed (VO refs customer.v1) → customer.v2
+        // keepLatest(1) would delete customer.v1, but the retained VO snapshot was committed
+        // when v1 was current → rescue required.
+        Customer customer = repo.save(new Customer("VORef", "voref@test.de", "0", "Berlin")); // v1
+
+        // Contract committed while customer is still at v1 — VO references customer.v1.
+        contractRepo.save(new Contract("Ref-Contract",
+                new ContractPeriod(LocalDate.of(2024, 1, 1), LocalDate.of(2024, 12, 31), customer)));
+
+        customer.setCity("Hamburg"); customer = repo.save(customer);  // v2 (after Contract)
+
+        CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(1));
+
+        assertThat(result.rescuedSnapshots())
+                .as("customer.v1 referenced from retained VO snapshot must be rescued")
+                .isEqualTo(1);
+        assertThat(snapshotCount(customer)).isEqualTo(2); // v1 rescued + v2 kept
+    }
+
+    // -------------------------------------------------------------------------
+    // Behavior 7c: reference protection works for entities with String @Id
+    // -------------------------------------------------------------------------
+
+    @Test
+    void reference_protection_works_for_string_id_entity() {
+        // Tag uses @Id String code. Javers serializes String IDs with surrounding JSON quotes
+        // in jv_global_id.local_id (e.g. "\"PRIO-1\""). buildEntityRefLookup must strip those
+        // quotes (normalizeLocalId) so the lookup key matches cdoIdNode.asText() from state JSON.
+        // parseLocalId must do the same so that byInstanceId finds the Tag snapshot for promotion.
+        //
+        // Timeline: tag.v1 → Order committed (refs tag.v1) → tag.v2 → tag.v3
+        Tag tag = tagRepo.save(new Tag("PRIO-1", "Priority"));                   // v1
+
+        Customer customer = repo.save(new Customer("StrId", "strid@test.de", "0", "Berlin"));
+        orderRepo.save(new Order("ORD-STR", customer, "NEW", tag));              // refs tag.v1
+
+        tag.setLabel("Priority High");     tag = tagRepo.save(tag);              // v2
+        tag.setLabel("Priority Critical"); tag = tagRepo.save(tag);              // v3
+
+        // keepLatest(1): delete tag.v1 and v2, keep v3.
+        // But the retained Order snapshot was committed when tag.v1 was current → rescue v1.
+        CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(1));
+
+        assertThat(result.rescuedSnapshots())
+                .as("Tag (String @Id) anchor snapshot must be rescued via reference protection")
+                .isEqualTo(1);
     }
 
     // -------------------------------------------------------------------------

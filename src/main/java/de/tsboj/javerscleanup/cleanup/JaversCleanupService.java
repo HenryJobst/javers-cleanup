@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.javers.core.Javers;
-import org.javers.core.metamodel.object.CdoSnapshot;
 import org.javers.repository.jql.QueryBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,13 +34,14 @@ import java.util.stream.Collectors;
  * {@code {"entity": "pkg.ClassName", "cdoId": X}}. If a retained snapshot of entity A
  * references entity B, then B must have at least one snapshot with
  * {@code commitDate ≤ A.commitDate} — otherwise historical reconstruction of that
- * reference would use a later (incorrect) state of B.
+ * reference would use a later (incorrect) state of B. This applies to both entity
+ * snapshots and Value Object snapshots (which may contain {@code @ManyToOne} fields).
  *
  * <p>The three-phase cleanup process:
  * <ol>
  *   <li><b>Phase 1</b> — compute proposed deletion sets per entity according to policy.</li>
- *   <li><b>Phase 2</b> — scan the {@code state} JSON of <em>retained</em> snapshots for
- *       entity references; build a map of
+ *   <li><b>Phase 2</b> — scan the {@code state} JSON of <em>all</em> retained snapshots
+ *       (entities and VOs) for entity references; build a map of
  *       {@code globalIdPk → earliestReferenceCommitDate}.</li>
  *   <li><b>Phase 3</b> — for each referenced entity whose oldest retained snapshot would
  *       be newer than the earliest reference date, rescue the most recent snapshot that
@@ -61,14 +61,17 @@ public class JaversCleanupService {
     private final Javers javers;
     private final JdbcTemplate jdbc;
     private final NamedParameterJdbcTemplate namedJdbc;
+    private final SnapshotPromoter promoter;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public JaversCleanupService(Javers javers,
                                 JdbcTemplate jdbc,
-                                NamedParameterJdbcTemplate namedJdbc) {
+                                NamedParameterJdbcTemplate namedJdbc,
+                                SnapshotPromoter promoter) {
         this.javers = javers;
         this.jdbc = jdbc;
         this.namedJdbc = namedJdbc;
+        this.promoter = promoter;
     }
 
     /**
@@ -93,7 +96,7 @@ public class JaversCleanupService {
                     new ArrayList<>(policy.selectForDeletion(snapshots)));
         }
 
-        // Phase 2: Scan retained entity snapshots for cross-entity references.
+        // Phase 2: Scan ALL retained snapshots (entities and VOs) for cross-entity references.
         Map<Long, LocalDateTime> earliestRefDate =
                 scanRetainedSnapshotsForReferences(allSnapshotsByGlobalId, deletionSetsByGlobalId);
 
@@ -119,7 +122,7 @@ public class JaversCleanupService {
                 // Only UPDATE snapshots need promotion; INITIAL is already correct,
                 // TERMINAL indicates a deleted entity and should not become INITIAL.
                 if ("UPDATE".equals(oldestRemaining.type())) {
-                    promoteToInitial(oldestRemaining);
+                    promoter.promoteToInitial(oldestRemaining);
                     promoted++;
                 }
             }
@@ -144,7 +147,7 @@ public class JaversCleanupService {
     // -------------------------------------------------------------------------
 
     /**
-     * Scans the {@code state} JSON of all retained entity snapshots (non-VOs) for
+     * Scans the {@code state} JSON of all retained snapshots (entities and VOs) for
      * entity references and returns the earliest {@code commitDate} at which each
      * referenced entity's {@code globalIdPk} appears as a reference target.
      */
@@ -152,17 +155,17 @@ public class JaversCleanupService {
             Map<Long, List<SnapshotRow>> allSnapshotsByGlobalId,
             Map<Long, List<Long>> deletionSetsByGlobalId) {
 
-        List<Long> retainedEntitySnapshotIds = allSnapshotsByGlobalId.entrySet().stream()
+        // Include both entity snapshots and VO snapshots: VOs may contain @ManyToOne references.
+        List<Long> retainedSnapshotIds = allSnapshotsByGlobalId.entrySet().stream()
                 .flatMap(e -> {
                     Set<Long> toDelete = new HashSet<>(deletionSetsByGlobalId.get(e.getKey()));
                     return e.getValue().stream()
-                            .filter(s -> !toDelete.contains(s.id()))
-                            .filter(s -> !s.isValueObject());
+                            .filter(s -> !toDelete.contains(s.id()));
                 })
                 .map(SnapshotRow::id)
                 .toList();
 
-        if (retainedEntitySnapshotIds.isEmpty()) return Map.of();
+        if (retainedSnapshotIds.isEmpty()) return Map.of();
 
         record StateWithDate(LocalDateTime commitDate, String state) {}
 
@@ -172,7 +175,7 @@ public class JaversCleanupService {
                 JOIN jv_commit c ON s.commit_fk = c.commit_pk
                 WHERE s.snapshot_pk IN (:ids)
                 """,
-                Map.of("ids", retainedEntitySnapshotIds),
+                Map.of("ids", retainedSnapshotIds),
                 (rs, i) -> new StateWithDate(
                         rs.getTimestamp("commit_date").toLocalDateTime(),
                         rs.getString("state")
@@ -236,7 +239,7 @@ public class JaversCleanupService {
             // predates the reference date. This single snapshot implicitly covers all
             // retained references to this entity (see class-level javadoc).
             boolean didRescue = snapshots.stream()
-                    .filter(s -> toDelete.contains(s.id()))
+                    .filter(s -> toDeleteSet.contains(s.id()))
                     .filter(s -> !s.commitDate().isAfter(refDate))
                     .max(Comparator.comparing(SnapshotRow::commitDate))
                     .map(candidate -> {
@@ -257,7 +260,13 @@ public class JaversCleanupService {
     // JSON reference scanning helpers
     // -------------------------------------------------------------------------
 
-    /** Builds a lookup map from {@code "typeName/localId"} to {@code global_id_pk}. */
+    /**
+     * Builds a lookup map from {@code "typeName/normalizedLocalId"} to {@code global_id_pk}.
+     *
+     * <p>Uses {@link SnapshotPromoter#normalizeLocalId} to strip Javers' JSON-string quotes
+     * from non-numeric IDs so the key matches what {@link #collectEntityRefs} produces via
+     * {@code cdoIdNode.asText()}.
+     */
     private Map<String, Long> buildEntityRefLookup() {
         return jdbc.query("""
                 SELECT global_id_pk, type_name, local_id
@@ -265,7 +274,7 @@ public class JaversCleanupService {
                 WHERE owner_id_fk IS NULL
                 """,
                 (rs, i) -> Map.entry(
-                        rs.getString("type_name") + "/" + rs.getString("local_id"),
+                        rs.getString("type_name") + "/" + SnapshotPromoter.normalizeLocalId(rs.getString("local_id")),
                         rs.getLong("global_id_pk")
                 ))
                 .stream()
@@ -304,67 +313,6 @@ public class JaversCleanupService {
             }
         } else if (node.isArray()) {
             node.elements().forEachRemaining(e -> collectEntityRefs(e, refs));
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Snapshot promotion
-    // -------------------------------------------------------------------------
-
-    /**
-     * Promotes an UPDATE snapshot to INITIAL.
-     *
-     * <p>The {@code state} column already contains the full object state and is left
-     * unchanged. Only {@code type} and {@code changed_properties} are updated so that
-     * Javers interprets this snapshot as a complete initial creation.
-     */
-    private void promoteToInitial(SnapshotRow snapshot) {
-        Set<String> allPropertyNames = loadPropertyNamesFromJavers(snapshot);
-        // Java identifier names contain no quotes or backslashes, so this manual
-        // JSON array format is correct and safe.
-        String allPropertiesJson = allPropertyNames.stream()
-                .map(name -> "\"" + name + "\"")
-                .collect(Collectors.joining(",", "[", "]"));
-
-        jdbc.update(
-                "UPDATE jv_snapshot SET type = 'INITIAL', changed_properties = ? WHERE snapshot_pk = ?",
-                allPropertiesJson, snapshot.id());
-
-        log.debug("Snapshot {} (v{}) promoted to INITIAL", snapshot.id(), snapshot.version());
-    }
-
-    /**
-     * Reads all property names for the given snapshot via the Javers API.
-     * Handles both regular entities and Value Objects (embedded types with
-     * {@code owner_id_fk} set in {@code jv_global_id}). VOs require
-     * {@code QueryBuilder.byValueObjectId()} because {@code byInstanceId()} only
-     * works for entities with their own identity.
-     */
-    @SuppressWarnings("unchecked")
-    private Set<String> loadPropertyNamesFromJavers(SnapshotRow row) {
-        try {
-            List<CdoSnapshot> snapshots;
-            if (row.isValueObject()) {
-                Class<?> ownerClass = Class.forName(row.ownerTypeName());
-                snapshots = javers.findSnapshots(
-                        QueryBuilder.byValueObjectId(
-                                parseLocalId(row.ownerLocalId()), ownerClass, row.fragment()
-                        ).build());
-            } else {
-                Class<?> entityClass = Class.forName(row.typeName());
-                snapshots = javers.findSnapshots(
-                        QueryBuilder.byInstanceId(parseLocalId(row.localId()), entityClass).build());
-            }
-            return snapshots.stream()
-                    .filter(s -> s.getVersion() == row.version())
-                    .findFirst()
-                    .map(s -> s.getState().getPropertyNames())
-                    .orElseThrow(() -> new IllegalStateException(
-                            "Snapshot v%d for %s (fragment=%s) not found in Javers"
-                                    .formatted(row.version(), row.typeName(), row.fragment())));
-        } catch (ClassNotFoundException e) {
-            throw new IllegalStateException(
-                    "Class not found: " + (row.isValueObject() ? row.ownerTypeName() : row.typeName()), e);
         }
     }
 
@@ -428,10 +376,5 @@ public class JaversCleanupService {
                 """);
 
         return deletedCommits;
-    }
-
-    private static Object parseLocalId(String localId) {
-        try { return Long.parseLong(localId); }
-        catch (NumberFormatException e) { return localId; }
     }
 }

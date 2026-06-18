@@ -1,8 +1,6 @@
 package de.tsboj.javerscleanup.cleanup;
 
 import org.javers.core.Javers;
-import org.javers.core.metamodel.object.CdoSnapshot;
-import org.javers.repository.jql.QueryBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -14,8 +12,6 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
-import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * Retroactively creates Javers snapshots for entities that were inserted or modified
@@ -44,12 +40,15 @@ public class JaversMigrationService {
     private final Javers javers;
     private final JdbcTemplate jdbc;
     private final NamedParameterJdbcTemplate namedJdbc;
+    private final SnapshotPromoter promoter;
 
     public JaversMigrationService(Javers javers, JdbcTemplate jdbc,
-                                  NamedParameterJdbcTemplate namedJdbc) {
+                                  NamedParameterJdbcTemplate namedJdbc,
+                                  SnapshotPromoter promoter) {
         this.javers = javers;
         this.jdbc = jdbc;
         this.namedJdbc = namedJdbc;
+        this.promoter = promoter;
     }
 
     /**
@@ -136,7 +135,7 @@ public class JaversMigrationService {
                 maxSnapshotPkBefore);
 
         for (SnapshotRow row : toPromote) {
-            promoteToInitial(row);
+            promoter.promoteToInitial(row);
         }
 
         if (!toPromote.isEmpty()) {
@@ -148,47 +147,6 @@ public class JaversMigrationService {
         return toPromote.size();
     }
 
-    private void promoteToInitial(SnapshotRow snapshot) {
-        Set<String> propertyNames = loadPropertyNamesFromJavers(snapshot);
-        String allPropertiesJson = propertyNames.stream()
-                .map(name -> "\"" + name + "\"")
-                .collect(Collectors.joining(",", "[", "]"));
-
-        jdbc.update(
-                "UPDATE jv_snapshot SET type = 'INITIAL', changed_properties = ? WHERE snapshot_pk = ?",
-                allPropertiesJson, snapshot.id());
-
-        log.debug("Snapshot {} (v{}) retroactively promoted to INITIAL", snapshot.id(), snapshot.version());
-    }
-
-    @SuppressWarnings("unchecked")
-    private Set<String> loadPropertyNamesFromJavers(SnapshotRow row) {
-        try {
-            List<CdoSnapshot> snapshots;
-            if (row.isValueObject()) {
-                Class<?> ownerClass = Class.forName(row.ownerTypeName());
-                snapshots = javers.findSnapshots(
-                        QueryBuilder.byValueObjectId(
-                                parseLocalId(row.ownerLocalId()), ownerClass, row.fragment()
-                        ).build());
-            } else {
-                Class<?> entityClass = Class.forName(row.typeName());
-                snapshots = javers.findSnapshots(
-                        QueryBuilder.byInstanceId(parseLocalId(row.localId()), entityClass).build());
-            }
-            return snapshots.stream()
-                    .filter(s -> s.getVersion() == row.version())
-                    .findFirst()
-                    .map(s -> s.getState().getPropertyNames())
-                    .orElseThrow(() -> new IllegalStateException(
-                            "Snapshot v%d for %s (fragment=%s) not found in Javers"
-                                    .formatted(row.version(), row.typeName(), row.fragment())));
-        } catch (ClassNotFoundException e) {
-            throw new IllegalStateException(
-                    "Class not found: " + (row.isValueObject() ? row.ownerTypeName() : row.typeName()), e);
-        }
-    }
-
     private void backdateNewCommits(long maxCommitPkBefore, Instant timestamp) {
         jdbc.update("""
                 UPDATE jv_commit
@@ -198,12 +156,19 @@ public class JaversMigrationService {
                 Timestamp.from(timestamp), timestamp.toString(), maxCommitPkBefore);
     }
 
+    /**
+     * Counts only entity-level snapshots (fragment IS NULL) to avoid inflating the counts
+     * with Value Object snapshots, which are created alongside their owner entity but are
+     * not separate entries in the input {@code entities} collection.
+     */
     private MigrationResult buildResult(long maxSnapshotPkBefore, int totalEntities, int corrected) {
         List<java.util.Map<String, Object>> stats = jdbc.queryForList("""
-                SELECT type, COUNT(*) as cnt
-                FROM jv_snapshot
-                WHERE snapshot_pk > ?
-                GROUP BY type
+                SELECT s.type, COUNT(*) as cnt
+                FROM jv_snapshot s
+                JOIN jv_global_id g ON s.global_id_fk = g.global_id_pk
+                WHERE s.snapshot_pk > ?
+                  AND g.fragment IS NULL
+                GROUP BY s.type
                 """, maxSnapshotPkBefore);
 
         int initial = 0, update = 0;
@@ -225,10 +190,5 @@ public class JaversMigrationService {
     private long currentMaxCommitPk() {
         Long max = jdbc.queryForObject("SELECT MAX(commit_pk) FROM jv_commit", Long.class);
         return max != null ? max : 0L;
-    }
-
-    private static Object parseLocalId(String localId) {
-        try { return Long.parseLong(localId); }
-        catch (NumberFormatException e) { return localId; }
     }
 }

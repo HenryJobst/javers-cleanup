@@ -200,6 +200,35 @@ abstract class AbstractJaversMigrationServiceTest {
     }
 
     // -------------------------------------------------------------------------
+    // Behavior 5b: unchangedEntities count is correct when VOs are present
+    // -------------------------------------------------------------------------
+
+    @Test
+    void commitAll_unchangedEntities_count_is_correct_when_some_entities_have_value_objects() {
+        // 'unchanged' is already audited and its state will not change.
+        Contract unchanged = contractRepo.save(new Contract("Existing",
+                new ContractPeriod(LocalDate.of(2023, 1, 1), LocalDate.of(2023, 12, 31))));
+
+        // Two contracts not yet audited, each with an embedded VO.
+        Contract newC1 = new Contract("New-1",
+                new ContractPeriod(LocalDate.of(2024, 1, 1), LocalDate.of(2024, 12, 31)));
+        em.persist(newC1); em.flush();
+        Contract newC2 = new Contract("New-2",
+                new ContractPeriod(LocalDate.of(2025, 1, 1), LocalDate.of(2025, 12, 31)));
+        em.persist(newC2); em.flush();
+
+        // javers.commit() creates 2 INITIAL snapshots per new contract (entity + VO).
+        // buildResult must count only entity snapshots so that unchangedEntities = 1,
+        // not 0 (which was the bug when VO snapshots inflated the initial count).
+        MigrationResult result = migrationService.commitAll(
+                List.of(newC1, newC2, unchanged), "migration");
+
+        assertThat(result.newInitialSnapshots()).isEqualTo(2); // newC1, newC2 (VOs excluded)
+        assertThat(result.newUpdateSnapshots()).isEqualTo(0);
+        assertThat(result.unchangedEntities()).isEqualTo(1);   // 'unchanged' had no diff
+    }
+
+    // -------------------------------------------------------------------------
     // Behavior 6: Value Objects (embedded entities with own jv_global_id entries)
     // -------------------------------------------------------------------------
 

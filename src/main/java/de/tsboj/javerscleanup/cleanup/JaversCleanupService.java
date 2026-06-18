@@ -104,7 +104,14 @@ public class JaversCleanupService {
         int rescued = rescueAnchorSnapshots(
                 allSnapshotsByGlobalId, deletionSetsByGlobalId, earliestRefDate);
 
-        // Execute deletions (deletion sets may have been trimmed by Phase 3).
+        // Phase 4: Fill version gaps so that javers.findChanges() never encounters a
+        // deleted intermediate snapshot. A gap arises when Phase 3 rescues an old
+        // snapshot (e.g. v1) while a snapshot between it and the next retained one
+        // (e.g. v2) remains in the deletion set — leaving v1…gap…v3. Javers'
+        // SnapshotDiffer cannot bridge such gaps and throws IllegalArgumentException.
+        rescued += fillVersionGaps(allSnapshotsByGlobalId, deletionSetsByGlobalId);
+
+        // Execute deletions (deletion sets may have been trimmed by Phases 3 and 4).
         int promoted = 0;
         int deleted = 0;
 
@@ -254,6 +261,67 @@ public class JaversCleanupService {
             if (didRescue) rescued++;
         }
         return rescued;
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 4: version-gap fill
+    // -------------------------------------------------------------------------
+
+    /**
+     * Ensures no version gaps exist in the remaining snapshot chain for any entity.
+     * Javers' {@code SnapshotDiffer} requires consecutive versions when computing diffs;
+     * a gap (e.g. v1, v3, v4 with v2 deleted) causes {@code IllegalArgumentException}.
+     *
+     * <p>A gap can arise when Phase 3 rescues an old anchor (e.g. v1) while a snapshot
+     * between it and the next retained version (e.g. v2) is still in the deletion set.
+     * This method rescues those intermediate snapshots to close every such gap.
+     *
+     * @return number of additional snapshots rescued to fill gaps
+     */
+    private int fillVersionGaps(
+            Map<Long, List<SnapshotRow>> allSnapshotsByGlobalId,
+            Map<Long, List<Long>> deletionSetsByGlobalId) {
+
+        int filled = 0;
+        for (Map.Entry<Long, List<SnapshotRow>> entry : allSnapshotsByGlobalId.entrySet()) {
+            Long globalId = entry.getKey();
+            List<Long> toDelete = deletionSetsByGlobalId.get(globalId);
+            if (toDelete == null || toDelete.isEmpty()) continue;
+
+            List<SnapshotRow> snapshots = entry.getValue(); // sorted ascending by version
+
+            // Repeat until stable: rescuing a gap snapshot may expose a new gap.
+            boolean anyFilled;
+            do {
+                anyFilled = false;
+                Set<Long> toDeleteSet = new HashSet<>(toDelete);
+
+                SnapshotRow prevRetained = null;
+                for (SnapshotRow s : snapshots) {
+                    if (toDeleteSet.contains(s.id())) continue; // in deletion set
+                    if (prevRetained != null && s.version() - prevRetained.version() > 1) {
+                        // Gap detected between prevRetained.version and s.version.
+                        // Rescue all deletion-set snapshots that fall inside the gap.
+                        final long lo = prevRetained.version();
+                        final long hi = s.version();
+                        for (SnapshotRow gap : snapshots) {
+                            if (toDelete.contains(gap.id())
+                                    && gap.version() > lo && gap.version() < hi) {
+                                toDelete.remove(gap.id());
+                                filled++;
+                                anyFilled = true;
+                                log.debug("Gap fill for GlobalId {}: rescued snapshot {} (v{}) "
+                                        + "between retained v{} and v{}",
+                                        globalId, gap.id(), gap.version(), lo, hi);
+                            }
+                        }
+                        toDeleteSet = new HashSet<>(toDelete); // refresh after modifications
+                    }
+                    prevRetained = s;
+                }
+            } while (anyFilled);
+        }
+        return filled;
     }
 
     // -------------------------------------------------------------------------

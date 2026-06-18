@@ -445,9 +445,12 @@ abstract class AbstractJaversCleanupServiceTest {
         // But the retained Order snapshot was committed when tag.v1 was current → rescue v1.
         CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(1));
 
+        // Phase 3 rescues tag.v1 (reference protection).
+        // Phase 4 rescues tag.v2 to fill the version gap v1…v3 caused by the rescue,
+        // ensuring javers.findChanges() does not encounter a broken chain.
         assertThat(result.rescuedSnapshots())
-                .as("Tag (String @Id) anchor snapshot must be rescued via reference protection")
-                .isEqualTo(1);
+                .as("Tag (String @Id): v1 rescued for reference protection, v2 rescued to fill gap")
+                .isEqualTo(2);
     }
 
     // -------------------------------------------------------------------------

@@ -42,9 +42,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *               Contract "SLA-2024" + VO: v1  — VO refs Customer=v4
  *
  *   Cleanup 1  keepLatest(2)
- *               Customer: rescue v1 (Order.v1 refs it), delete v2 → keep v1,v3,v4
- *               Note: Javers' findChanges cannot bridge the v2 gap (deleted from the
- *               middle of the chain); the check uses findSnapshots to verify the gap.
+ *               Customer: rescue v1 (Order.v1 refs it), rescue v2 (gap fill: v1…v3 gap),
+ *               nothing deleted → full chain v1-v4 preserved; findChanges works.
  *
  *   Phase 2   More changes
  *               Tag: v2("VIP Plus")
@@ -125,32 +124,33 @@ abstract class AbstractJaversLifecycleIntegrationTest {
         //     (v2 was committed after the Order, so v2.commitDate > T(order.v1))
         //   → rescue v1, toDelete[Customer] = [v2].
         //
-        // Execution: delete v2; remaining = [v1, v3, v4].
-        //   v1 is already INITIAL → no promotion.
+        // Phase 4 (gap fill):
+        //   Remaining would be [v1, v3, v4] — gap at v2 (v1.version=1, v3.version=3).
+        //   v2 is still in toDelete → rescue v2 to close the gap.
+        //   → toDelete[Customer] = [] (nothing deleted).
         //
+        // Execution: Customer fully preserved; v1 is INITIAL → no promotion.
         // All other entities: ≤2 snapshots → nothing deleted.
         // =====================================================================
 
         CleanupResult result1 = cleanupService.cleanup(CleanupPolicy.keepLatest(2));
 
-        assertThat(result1.rescuedSnapshots()).isEqualTo(1);  // Customer.v1 rescued
-        assertThat(result1.deletedSnapshots()).isEqualTo(1);  // Customer.v2 deleted
-        assertThat(result1.deletedCommits()).isEqualTo(1);    // Customer.v2's commit orphaned
+        assertThat(result1.rescuedSnapshots()).isEqualTo(2);  // Customer.v1 (ref) + v2 (gap fill)
+        assertThat(result1.deletedSnapshots()).isEqualTo(0);  // nothing deleted (gap fill prevents it)
+        assertThat(result1.deletedCommits()).isEqualTo(0);
         assertThat(result1.promotedSnapshots()).isEqualTo(0); // v1 is already INITIAL
-        assertThat(snapshotCount(customer)).isEqualTo(3);     // v1, v3, v4
+        assertThat(snapshotCount(customer)).isEqualTo(4);     // v1, v2, v3, v4 — all intact
 
-        // Customer.v2 (Munich) is gone.
-        // findChanges cannot bridge a deleted intermediate snapshot, so we verify the
-        // state gap directly via findSnapshots (sorted ascending by version):
-        //   v1(Berlin) → v3(Hamburg)  [v2/Munich missing]  → v4(Frankfurt)
-        List<CdoSnapshot> customerChain1 = snapshotsSortedAsc(customer);
-        assertThat(customerChain1).hasSize(3);
-        assertThat(customerChain1.get(0).getType()).isEqualTo(SnapshotType.INITIAL);
-        assertThat(customerChain1.get(0).getState().getPropertyValue("city")).isEqualTo("Berlin");   // v1
-        assertThat(customerChain1.get(1).getType()).isEqualTo(SnapshotType.UPDATE);
-        assertThat(customerChain1.get(1).getState().getPropertyValue("city")).isEqualTo("Hamburg");  // v3 – no Munich
-        assertThat(customerChain1.get(2).getType()).isEqualTo(SnapshotType.UPDATE);
-        assertThat(customerChain1.get(2).getState().getPropertyValue("city")).isEqualTo("Frankfurt");// v4
+        // Full chain preserved: findChanges works without gaps.
+        // Returns newest-first: Hamburg→Frankfurt, Munich→Hamburg, Berlin→Munich.
+        List<ValueChange> cityDiffs1 = cityValueChanges(customer);
+        assertThat(cityDiffs1).hasSize(3);
+        assertThat(cityDiffs1.get(0).getLeft()).isEqualTo("Hamburg");    // v3→v4
+        assertThat(cityDiffs1.get(0).getRight()).isEqualTo("Frankfurt");
+        assertThat(cityDiffs1.get(1).getLeft()).isEqualTo("Munich");     // v2→v3
+        assertThat(cityDiffs1.get(1).getRight()).isEqualTo("Hamburg");
+        assertThat(cityDiffs1.get(2).getLeft()).isEqualTo("Berlin");     // v1→v2
+        assertThat(cityDiffs1.get(2).getRight()).isEqualTo("Munich");
 
         // Tag, Order, Contract: untouched — each still has a single INITIAL snapshot.
         assertThat(findOldestSnapshot(tag).getType()).isEqualTo(SnapshotType.INITIAL);
@@ -181,7 +181,7 @@ abstract class AbstractJaversLifecycleIntegrationTest {
         contract.getPeriod().setResponsibleCustomer(customer); // VO now refs Customer@v5
         contract = contractRepo.save(contract);     // Contract.v2, VO.v2
 
-        assertThat(snapshotCount(customer)).isEqualTo(4); // v1, v3, v4, v5
+        assertThat(snapshotCount(customer)).isEqualTo(5); // v1, v2, v3, v4, v5
         assertThat(snapshotCount(tag)).isEqualTo(2);      // v1, v2
         assertThat(snapshotCount(order)).isEqualTo(2);    // v1, v2
         assertThat(snapshotCount(contract)).isEqualTo(2); // v1, v2
@@ -213,8 +213,12 @@ abstract class AbstractJaversLifecycleIntegrationTest {
 
         CleanupResult result2 = cleanupService.cleanup(CleanupPolicy.keepLatest(1));
 
-        assertThat(result2.rescuedSnapshots()).isEqualTo(1);  // Customer.v4
-        assertThat(result2.deletedSnapshots()).isEqualTo(6);  // Customer v1+v3, Tag v1,
+        // Customer has v1..v5. keepLatest(1) proposes deleting [v1,v2,v3,v4].
+        // Phase 3 rescues v4 (Order.v2 ref). toDelete = [v1,v2,v3].
+        // Phase 4: remaining = [v4, v5] — versions 4 and 5 are consecutive → no gap fill.
+        // v1+v2+v3 are deleted; v4 is promoted to INITIAL.
+        assertThat(result2.rescuedSnapshots()).isEqualTo(1);  // Customer.v4 (ref protection only)
+        assertThat(result2.deletedSnapshots()).isEqualTo(7);  // Customer v1+v2+v3, Tag v1,
                                                                // Order v1, Contract v1, VO v1
         assertThat(result2.promotedSnapshots()).isEqualTo(5); // Customer.v4, Tag.v2, Order.v2,
                                                                // Contract.v2, ContractPeriod.v2
@@ -303,18 +307,7 @@ abstract class AbstractJaversLifecycleIntegrationTest {
                 .orElseThrow();
     }
 
-    /** Returns snapshots sorted ascending by version (oldest first). */
-    private List<CdoSnapshot> snapshotsSortedAsc(Object entity) {
-        return javers.findSnapshots(QueryBuilder.byInstance(entity).build()).stream()
-                .sorted(Comparator.comparingLong(CdoSnapshot::getVersion))
-                .toList();
-    }
-
-    /**
-     * Returns real city ValueChanges (newest-first), excluding InitialValueChange.
-     * Requires a gap-free snapshot chain; call only after all intermediate snapshots
-     * have been promoted (i.e. after Cleanup 2, not after Cleanup 1).
-     */
+    /** Returns real city ValueChanges (newest-first), excluding InitialValueChange. */
     private List<ValueChange> cityValueChanges(Customer customer) {
         return javers.findChanges(QueryBuilder.byInstance(customer).build()).stream()
                 .filter(c -> c.getClass() == ValueChange.class

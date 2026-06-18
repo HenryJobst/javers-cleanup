@@ -64,6 +64,12 @@ Phase 3 — Anchor rescue:
     Does the oldest retained snapshot predate the earliest reference date?
     No → rescue the most recent deletion candidate with commitDate ≤ reference date
 
+Phase 4 — Version-gap fill:
+  For each GlobalId whose deletion set was modified by Phase 3:
+    Scan remaining versions for gaps (non-consecutive version numbers)
+    Rescue any deleted snapshot that falls inside a gap
+    Repeat until no gaps remain
+
 Execution:
   For each GlobalId with a non-empty deletion set:
     Inspect the oldest remaining snapshot:
@@ -132,24 +138,19 @@ After a promotion (UPDATE → INITIAL), `javers.findChanges()` returns **three c
 
 To filter for real update diffs in application code: `ch.getClass() == ValueChange.class` excludes `InitialValueChange` (a subtype) and returns only true update changes.
 
-**Limitation — gaps in the snapshot chain:**  
-When an intermediate snapshot is deleted without becoming the anchor (e.g. v1, v3, v4 remain after deleting v2), `javers.findChanges()` throws `IllegalArgumentException` inside `SnapshotDiffer` because Javers cannot reconstruct a diff across the gap. This situation arises when the rescue mechanism saves a different snapshot than the one at the gap position (it saves the earliest possible anchor, not the next-newest).
+**Version-gap fill (Phase 4):**  
+Javers' `SnapshotDiffer` requires a consecutive version sequence when computing diffs; a gap (e.g. v1, v3, v4 with v2 deleted) causes `IllegalArgumentException`. This can arise when Phase 3 rescues an old anchor (e.g. v1) while a snapshot between it and the next retained version (e.g. v2) remains in the deletion set.
 
-In this case, use `javers.findSnapshots()` and compare states directly:
+`JaversCleanupService` prevents this automatically in **Phase 4**: after the anchor rescue, the remaining version sequence is scanned for gaps. Any deleted snapshot that falls inside a gap is rescued, closing it before execution. The count of gap-filled snapshots is included in `CleanupResult.rescuedSnapshots()`.
 
-```java
-List<CdoSnapshot> chain = javers.findSnapshots(QueryBuilder.byInstance(entity).build())
-        .stream()
-        .sorted(Comparator.comparingLong(CdoSnapshot::getVersion))
-        .toList();
+Example: keepLatest(2) on Customer v1..v4 with Order referencing v1:
 
-// States are directly readable, gap is visible in version numbers:
-chain.get(0).getState().getPropertyValue("city"); // Berlin  (v1 — anchor)
-chain.get(1).getState().getPropertyValue("city"); // Hamburg (v3 — v2/Munich deleted)
-chain.get(2).getState().getPropertyValue("city"); // Frankfurt (v4)
+```
+Phase 3 rescues v1  → toDelete = [v2]  → remaining would be [v1, v3, v4]  (gap!)
+Phase 4 fills gap   → toDelete = []    → remaining is [v1, v2, v3, v4]    (no gap)
 ```
 
-Once subsequent cleanups promote the anchor to INITIAL (e.g. v4 becomes INITIAL and older snapshots are removed), the chain becomes gap-free and `findChanges()` works correctly again.
+As a result, `javers.findChanges()` always works correctly after a cleanup run.
 
 ### Setting up a scheduled cleanup
 
@@ -248,6 +249,12 @@ Phase 3 — Anker-Rettung:
     Liegt der älteste verbleibende Snapshot VOR dem frühesten Referenz-Datum?
     Nein → neuesten Löschkandidaten mit commitDate ≤ Referenz-Datum retten
 
+Phase 4 — Versionslücken-Füllung:
+  Für jede GlobalId, deren Deletion-Set durch Phase 3 verändert wurde:
+    Verbleibende Versionen auf Lücken prüfen (nicht-aufeinanderfolgende Versionsnummern)
+    Gelöschte Snapshots innerhalb einer Lücke retten
+    Wiederholen bis keine Lücken mehr vorhanden
+
 Ausführung:
   Für jede GlobalId mit nicht-leerem Deletion-Set:
     Ältesten verbleibenden Snapshot prüfen:
@@ -316,24 +323,19 @@ Nach einer Beförderung (UPDATE → INITIAL) liefert `javers.findChanges()` für
 
 Für die Filterung im eigenen Code: `ch.getClass() == ValueChange.class` schließt `InitialValueChange` (Subtyp) aus und liefert nur die echten Update-Diffs.
 
-**Einschränkung — Lücken in der Snapshot-Kette:**  
-Wenn ein mittlerer Snapshot gelöscht wurde, ohne zum Anker zu werden (z.B. bleiben v1, v3, v4 übrig, nachdem v2 gelöscht wurde), wirft `javers.findChanges()` eine `IllegalArgumentException` im `SnapshotDiffer`, weil Javers die Lücke nicht überbrücken kann. Diese Situation entsteht, wenn der Rettungsmechanismus einen anderen Snapshot als den an der Lückenposition sichert (er rettet den frühestmöglichen Anker, nicht den nächstjüngeren).
+**Versionslücken-Füllung (Phase 4):**  
+Javers' `SnapshotDiffer` setzt eine lückenlose Versionsfolge voraus; eine Lücke (z.B. v1, v3, v4 bei gelöschtem v2) verursacht eine `IllegalArgumentException`. Dieses Problem kann entstehen, wenn Phase 3 einen alten Anker rettet (z.B. v1), während ein Snapshot zwischen ihm und dem nächsten behaltenen (z.B. v2) noch im Deletion-Set verbleibt.
 
-In diesem Fall bietet sich `javers.findSnapshots()` als Alternative an, um Zustände direkt zu vergleichen:
+`JaversCleanupService` verhindert das automatisch in **Phase 4**: Nach der Anker-Rettung wird die verbleibende Versionsfolge auf Lücken geprüft. Jeder gelöschte Snapshot, der in eine Lücke fällt, wird gerettet und schließt sie vor der Ausführung. Die Anzahl der so geretteten Snapshots fließt in `CleanupResult.rescuedSnapshots()` ein.
 
-```java
-List<CdoSnapshot> kette = javers.findSnapshots(QueryBuilder.byInstance(entity).build())
-        .stream()
-        .sorted(Comparator.comparingLong(CdoSnapshot::getVersion))
-        .toList();
+Beispiel: keepLatest(2) auf Customer v1..v4, wobei Order auf v1 referenziert:
 
-// Zustände direkt lesbar, Lücke sichtbar anhand der Versionsnummern:
-kette.get(0).getState().getPropertyValue("city"); // Berlin   (v1 — Anker)
-kette.get(1).getState().getPropertyValue("city"); // Hamburg  (v3 — v2/München gelöscht)
-kette.get(2).getState().getPropertyValue("city"); // Frankfurt (v4)
+```
+Phase 3 rettet v1   → toDelete = [v2]  → verbleibend wäre [v1, v3, v4]  (Lücke!)
+Phase 4 füllt Lücke → toDelete = []    → verbleibend ist   [v1, v2, v3, v4]  (keine Lücke)
 ```
 
-Sobald nachfolgende Cleanup-Läufe den Anker zu INITIAL befördern (z.B. wird v4 zu INITIAL und ältere Snapshots werden entfernt), ist die Kette wieder lückenlos und `findChanges()` funktioniert korrekt.
+Dadurch funktioniert `javers.findChanges()` nach jedem Cleanup-Lauf korrekt.
 
 ### Scheduled-Cleanup einrichten
 

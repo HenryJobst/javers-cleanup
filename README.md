@@ -2,11 +2,11 @@
 
 Spring components for maintaining Javers audit tables — consistent removal of outdated snapshots and retroactive creation of missing INITIAL snapshots after a migration run with Javers auditing disabled.
 
-Spring-Komponenten zur Pflege von Javers-Audit-Tabellen — konsistente Bereinigung veralteter Snapshots und retroaktive Erstellung fehlender INITIAL-Snapshots nach einer Migration ohne Javers-Auditing.
+→ [Deutsche Version](#deutsch)
 
 ---
 
-## Contents / Inhalt
+## Contents
 
 - [Requirements](#requirements)
 - [Project Structure](#project-structure)
@@ -26,8 +26,6 @@ Spring-Komponenten zur Pflege von Javers-Audit-Tabellen — konsistente Bereinig
 | Database | H2, PostgreSQL (and other SQL databases) |
 
 The demo application runs with H2 in-memory. Integration tests against PostgreSQL require Docker (`mvn verify`).
-
-Die Demo-Anwendung läuft mit H2 in-memory. Integrationstests gegen PostgreSQL erfordern Docker (`mvn verify`).
 
 ---
 
@@ -128,8 +126,6 @@ SnapshotRow.java
 
 `SnapshotRow` and `SnapshotPromoter` are `package-private`. Both services must therefore reside in the **same Java package**. Recommendation: place all classes in a dedicated package such as `com.example.javers.maintenance`.
 
-`SnapshotRow` und `SnapshotPromoter` sind `package-private`. Beide Services müssen sich daher im **selben Java-Paket** befinden. Empfehlung: alle Klassen in ein dediziertes Paket wie `com.example.javers.maintenance` legen.
-
 ---
 
 ## Documentation
@@ -138,3 +134,140 @@ SnapshotRow.java
 |---|---|
 | Snapshot Cleanup | [docs/cleanup.md](docs/cleanup.md) |
 | Retroactive Snapshots after Migration | [docs/migration.md](docs/migration.md) |
+
+---
+
+## Deutsch
+
+Spring-Komponenten zur Pflege von Javers-Audit-Tabellen — konsistente Bereinigung veralteter Snapshots und retroaktive Erstellung fehlender INITIAL-Snapshots nach einer Migration ohne Javers-Auditing.
+
+---
+
+## Inhalt
+
+- [Voraussetzungen](#voraussetzungen)
+- [Projektstruktur](#projektstruktur)
+- [Build & Test](#build--test-1)
+- [Integration](#integration-1)
+- [Dokumentation](#dokumentation)
+
+---
+
+## Voraussetzungen
+
+| | |
+|---|---|
+| Java | 21+ |
+| Spring Boot | 4.1.x |
+| Javers | 7.11.x (`javers-spring-boot-starter-sql`) |
+| Datenbank | H2, PostgreSQL (und andere SQL-Datenbanken) |
+
+Die Demo-Anwendung läuft mit H2 in-memory. Integrationstests gegen PostgreSQL erfordern Docker (`mvn verify`).
+
+---
+
+## Projektstruktur
+
+```
+src/main/java/de/tsboj/javerscleanup/
+├── cleanup/
+│   ├── JaversCleanupService.java    # Bereinigung veralteter Snapshots
+│   ├── CleanupPolicy.java           # count- oder zeitbasierte Policy
+│   ├── CleanupResult.java           # Ergebnis-Record
+│   ├── JaversMigrationService.java  # Retroaktive Snapshot-Erstellung
+│   ├── MigrationResult.java         # Ergebnis-Record
+│   ├── SnapshotPromoter.java        # Gemeinsamer Helper für Snapshot-Beförderung (package-private)
+│   └── SnapshotRow.java             # Internes JDBC-DTO (package-private)
+└── demo/
+    ├── Customer.java                # Beispiel-Entity
+    ├── CustomerRepository.java      # @JaversSpringDataAuditable
+    ├── Order.java                   # Beispiel-Entity mit @ManyToOne-Referenz
+    ├── OrderRepository.java         # @JaversSpringDataAuditable
+    └── DemoRunner.java              # CommandLineRunner-Demo
+```
+
+---
+
+## Build & Test
+
+```bash
+# Schnelltest mit H2 (kein Docker erforderlich)
+mvn test
+
+# Vollständiger Test inkl. PostgreSQL via Testcontainers
+mvn verify
+
+# Demo-Anwendung starten
+mvn spring-boot:run
+```
+
+---
+
+## Integration
+
+### Welche Dateien müssen übernommen werden?
+
+Kopiere das gesamte `cleanup`-Paket in die Zielanwendung und passe den Package-Namen an.
+
+**Für Cleanup only:**
+```
+CleanupPolicy.java
+CleanupResult.java
+JaversCleanupService.java
+SnapshotPromoter.java     ← package-private, muss im selben Paket bleiben
+SnapshotRow.java          ← package-private, muss im selben Paket bleiben
+```
+
+**Für Migration only:**
+```
+JaversMigrationService.java
+MigrationResult.java
+SnapshotPromoter.java     ← package-private, muss im selben Paket bleiben
+SnapshotRow.java          ← package-private, muss im selben Paket bleiben
+```
+
+**Für beides:**
+```
+CleanupPolicy.java
+CleanupResult.java
+JaversCleanupService.java
+JaversMigrationService.java
+MigrationResult.java
+SnapshotPromoter.java
+SnapshotRow.java
+```
+
+### Zusätzliche Maven-Abhängigkeiten
+
+`JaversCleanupService` benötigt Jackson für das JSON-Parsing der `state`-Spalte (Referenz-Scan). In web-basierten Spring-Boot-Anwendungen ist Jackson bereits transitiv vorhanden; in reinen JPA-Anwendungen muss es explizit ergänzt werden:
+
+```xml
+<!-- bereits vorhanden -->
+<dependency>
+    <groupId>org.javers</groupId>
+    <artifactId>javers-spring-boot-starter-sql</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-jpa</artifactId>
+</dependency>
+
+<!-- nur wenn jackson-databind nicht transitiv verfügbar ist -->
+<dependency>
+    <groupId>com.fasterxml.jackson.core</groupId>
+    <artifactId>jackson-databind</artifactId>
+</dependency>
+```
+
+### Hinweis zu package-privaten Klassen
+
+`SnapshotRow` und `SnapshotPromoter` sind `package-private`. Beide Services müssen sich daher im **selben Java-Paket** befinden. Empfehlung: alle Klassen in ein dediziertes Paket wie `com.example.javers.maintenance` legen.
+
+---
+
+## Dokumentation
+
+| Thema | Dokument |
+|---|---|
+| Snapshot-Bereinigung | [docs/cleanup.md](docs/cleanup.md) |
+| Retroaktive Snapshots nach Migration | [docs/migration.md](docs/migration.md) |

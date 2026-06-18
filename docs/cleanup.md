@@ -1,169 +1,6 @@
-# Javers Snapshot-Bereinigung / Snapshot Cleanup
+# Javers Snapshot Cleanup
 
----
-
-## Deutsch
-
-### Problem
-
-Javers bietet von sich aus keine Möglichkeit, die Audit-Tabellen zu bereinigen. Die Tabellen `jv_snapshot`, `jv_commit`, `jv_commit_property` und `jv_global_id` wachsen unbegrenzt. In Entwicklungs- und Testumgebungen, aber auch in Produktionssystemen mit hohem Schreibaufkommen, führt das zu Performanceproblemen und steigendem Speicherbedarf.
-
-### Warum einfaches DELETE nicht funktioniert
-
-Der naive Ansatz — `DELETE FROM jv_snapshot WHERE commit_date < ?` — zerstört die Konsistenz der Audit-Historie:
-
-**Struktur der Javers-Snapshots:**
-
-| Typ | `changed_properties` | `state` |
-|---|---|---|
-| `INITIAL` | **alle** Property-Namen | vollständiger Objektzustand |
-| `UPDATE` | nur die **geänderten** Property-Namen | vollständiger Objektzustand |
-| `TERMINAL` | leer | leer (Entity gelöscht) |
-
-Der `state`-Spalte enthält immer den vollständigen Zustand — das ist kein Problem. Das Problem ist `changed_properties`: Ein `UPDATE`-Snapshot enthält dort nur die geänderten Felder. Wenn der ursprüngliche `INITIAL`-Snapshot gelöscht wird, muss der älteste verbleibende `UPDATE`-Snapshot **befördert** werden:
-
-1. `type` → `INITIAL`
-2. `changed_properties` → alle Property-Namen (aus dem `state`-JSON)
-
-Nur so interpretiert Javers diesen Snapshot korrekt als vollständige Erstanlage des Objekts.
-
-**Außerdem:** Referenzen aus `jv_snapshot` auf `jv_commit` und `jv_global_id` (Foreign Keys) erzwingen eine bestimmte Löschreihenfolge.
-
-### Lösung: `JaversCleanupService`
-
-```java
-@Autowired
-JaversCleanupService cleanupService;
-
-// Nur die letzten 30 Snapshots pro Entity behalten
-CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(30));
-
-// Alles älter als 90 Tage löschen, mindestens 1 Snapshot pro Entity behalten
-CleanupResult result = cleanupService.cleanup(CleanupPolicy.olderThan(90, 1));
-```
-
-### Algorithmus
-
-Der Cleanup läuft in drei Phasen, um neben Beförderungen auch **entity-übergreifende Referenzintegrität** zu wahren (siehe nächster Abschnitt):
-
-```
-Phase 1 — Proposed Deletions berechnen:
-  Für jede GlobalId in jv_snapshot:
-    Alle Snapshots laden (aufsteigend nach Version)
-    Policy bestimmt: welche sollen gelöscht werden?
-
-Phase 2 — Referenz-Scan (Hybrid):
-  state-JSON aller verbleibenden Snapshots einlesen (Entities UND Value Objects)
-  {"entity": "...", "cdoId": ...}-Muster rekursiv extrahieren
-  → Map: globalIdPk → frühestes commitDate einer Referenz auf diese Entity
-
-Phase 3 — Anker-Rettung:
-  Für jede referenzierte Entity:
-    Liegt der älteste verbleibende Snapshot VOR dem frühesten Referenz-Datum?
-    Nein → neuesten löschkandidaten mit commitDate ≤ Referenz-Datum retten
-
-Ausführung:
-  Für jede GlobalId mit nicht-leerem Deletion-Set:
-    Ältesten verbleibenden Snapshot prüfen:
-      Falls type = 'UPDATE' → zu INITIAL befördern
-      (Property-Namen via Javers CdoSnapshot API, nicht JSON-Parsing)
-    DELETE jv_snapshot WHERE snapshot_pk IN (...)
-
-Nach allen Durchläufen:
-  DELETE jv_commit_property für verwaiste Commits
-  DELETE jv_commit für verwaiste Commits
-  DELETE jv_global_id (Kinder zuerst, dann Eltern)
-```
-
-### Referenzintegrität bei Entity-Verweisen
-
-Javers speichert Entity-Referenzen (z.B. `@ManyToOne`) nicht als Fremdschlüssel auf Snapshots, sondern als JSON-Referenz im `state`-Feld:
-
-```json
-{ "customer": { "entity": "de.example.Customer", "cdoId": 5 } }
-```
-
-**Das Problem ohne Schutz:** Wenn `Order v1` zum Zeitpunkt T erstellt wurde, als `Customer v1` der aktuelle Zustand war, und die Policy danach `Customer v1` löscht (weil neuere Snapshots existieren), liefert Javers bei einer historischen Abfrage zu Zeitpunkt T den falschen oder gar keinen Customer-Zustand.
-
-**Die Lösung (Hybrid-Ansatz):** Phase 2 scannt die `state`-JSON **aller** behaltenen Snapshots — sowohl von Entities als auch von Value Objects (z.B. `@Embeddable`-Typen mit `@ManyToOne`-Feldern) — und ermittelt pro referenzierter Entity das früheste Datum, an dem eine Referenz auf sie besteht. Phase 3 stellt sicher, dass jede referenzierte Entity mindestens einen Snapshot mit `commitDate ≤ diesem Datum` behält — nötigenfalls durch Rettung eines sonst gelöschten Snapshots.
-
-**Bekannte Einschränkung:** Es werden nur direkte Referenzen geschützt. Kaskaden (A → B → C) werden nicht automatisch aufgelöst.
-
-### API
-
-```java
-// count-basiert: genau N neueste Snapshots pro Entity behalten
-CleanupPolicy.keepLatest(int count)
-
-// zeitbasiert: Snapshots älter als N Tage löschen, mind. minKeep behalten
-CleanupPolicy.olderThan(int days, int minKeep)
-
-// Ergebnis
-record CleanupResult(
-    int promotedSnapshots,   // UPDATE → INITIAL Beförderungen
-    int deletedSnapshots,
-    int deletedCommits,
-    int rescuedSnapshots     // Anker-Rettungen für Referenzintegrität
-)
-```
-
-**`olderThan` — Zusammenspiel von `days` und `minKeep`:**  
-`minKeep` wirkt als absolute Untergrenze, unabhängig vom Alter. Selbst wenn alle 10 Snapshots einer Entity älter als `days` Tage sind, werden die `minKeep` neuesten immer behalten. Beispiel: `olderThan(90, 5)` löscht bei 10 Snapshots maximal 5 — auch wenn alle 10 das Alterslimit überschreiten.
-
-**Wann welche Policy?**
-
-| Szenario | Empfehlung |
-|---|---|
-| Entwicklung / Tests: wenige, aktuelle Einträge behalten | `keepLatest(5)` |
-| Produktion: rollierendes Zeitfenster mit Mindestbestand | `olderThan(180, 1)` |
-| Regulatorisch: exaktes Ablaufdatum + Sicherheitspuffer | `olderThan(365, 3)` |
-
-### `findChanges()` nach einem Cleanup
-
-Nach einer Beförderung (UPDATE → INITIAL) liefert `javers.findChanges()` für die bereinigte Entity **drei Änderungstypen**:
-
-| Typ | Bedeutung |
-|---|---|
-| `NewObject` | Entity "erstellt" am beförderten INITIAL-Snapshot |
-| `InitialValueChange` | Eigenschaftswerte zum Zeitpunkt des beförderten INITIAL |
-| `ValueChange` | Tatsächliche Änderungen zwischen aufeinanderfolgenden Snapshots |
-
-Für die Filterung im eigenen Code: `ch.getClass() == ValueChange.class` schließt `InitialValueChange` (Subtyp) aus und liefert nur die echten Update-Diffs.
-
-### Scheduled-Cleanup einrichten
-
-```java
-@Component
-public class JaversCleanupJob {
-
-    private final JaversCleanupService cleanupService;
-
-    @Scheduled(cron = "0 0 2 * * SUN")  // jeden Sonntag um 02:00 Uhr
-    public void run() {
-        CleanupResult result = cleanupService.cleanup(
-            CleanupPolicy.olderThan(180, 1)
-        );
-        log.info("Javers cleanup: {}", result);
-    }
-}
-```
-
-### Wichtige Hinweise
-
-- Der Service läuft in einer einzigen Transaktion pro `cleanup()`-Aufruf. Bei sehr großen Tabellen (Millionen Snapshots) sollte die Policy entsprechend eingeschränkt und der Job regelmäßig ausgeführt werden, um riesige Transaktionen zu vermeiden.
-- Nach einem Cleanup sollte die Javers-Anwendung neu gestartet werden, falls ein interner Snapshot-Cache konfiguriert ist (`CachingJaversRepository`).
-- `TERMINAL`-Snapshots (gelöschte Entities) werden nie zu INITIAL befördert.
-- Die `jv_global_id`-Bereinigung am Ende jedes Cleanup-Laufs entfernt **alle** verwaisten Einträge — nicht nur die durch diesen Cleanup erzeugten, sondern auch solche aus externen Datenmanipulationen oder Teilmigrationen. Das ist ein nützlicher Nebeneffekt, der die Datenbank konsistent hält.
-
-### Javers 7.11.x Schema
-
-Die Spaltennamen haben sich gegenüber älteren Versionen geändert:
-
-| Tabelle | PK-Spalte |
-|---|---|
-| `jv_snapshot` | `snapshot_pk` (früher: `id`) |
-| `jv_commit` | `commit_pk` (früher: `id`) |
-| `jv_global_id` | `global_id_pk` (früher: `id`) |
+→ [Deutsche Version](#deutsch)
 
 ---
 
@@ -329,3 +166,168 @@ Column names changed compared to older versions:
 | `jv_snapshot` | `snapshot_pk` (previously: `id`) |
 | `jv_commit` | `commit_pk` (previously: `id`) |
 | `jv_global_id` | `global_id_pk` (previously: `id`) |
+
+---
+
+## Deutsch
+
+### Problem
+
+Javers bietet von sich aus keine Möglichkeit, die Audit-Tabellen zu bereinigen. Die Tabellen `jv_snapshot`, `jv_commit`, `jv_commit_property` und `jv_global_id` wachsen unbegrenzt. In Entwicklungs- und Testumgebungen, aber auch in Produktionssystemen mit hohem Schreibaufkommen, führt das zu Performanceproblemen und steigendem Speicherbedarf.
+
+### Warum einfaches DELETE nicht funktioniert
+
+Der naive Ansatz — `DELETE FROM jv_snapshot WHERE commit_date < ?` — zerstört die Konsistenz der Audit-Historie:
+
+**Struktur der Javers-Snapshots:**
+
+| Typ | `changed_properties` | `state` |
+|---|---|---|
+| `INITIAL` | **alle** Property-Namen | vollständiger Objektzustand |
+| `UPDATE` | nur die **geänderten** Property-Namen | vollständiger Objektzustand |
+| `TERMINAL` | leer | leer (Entity gelöscht) |
+
+Der `state`-Spalte enthält immer den vollständigen Zustand — das ist kein Problem. Das Problem ist `changed_properties`: Ein `UPDATE`-Snapshot enthält dort nur die geänderten Felder. Wenn der ursprüngliche `INITIAL`-Snapshot gelöscht wird, muss der älteste verbleibende `UPDATE`-Snapshot **befördert** werden:
+
+1. `type` → `INITIAL`
+2. `changed_properties` → alle Property-Namen (aus dem `state`-JSON)
+
+Nur so interpretiert Javers diesen Snapshot korrekt als vollständige Erstanlage des Objekts.
+
+**Außerdem:** Referenzen aus `jv_snapshot` auf `jv_commit` und `jv_global_id` (Foreign Keys) erzwingen eine bestimmte Löschreihenfolge.
+
+### Lösung: `JaversCleanupService`
+
+```java
+@Autowired
+JaversCleanupService cleanupService;
+
+// Nur die letzten 30 Snapshots pro Entity behalten
+CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(30));
+
+// Alles älter als 90 Tage löschen, mindestens 1 Snapshot pro Entity behalten
+CleanupResult result = cleanupService.cleanup(CleanupPolicy.olderThan(90, 1));
+```
+
+### Algorithmus
+
+Der Cleanup läuft in drei Phasen, um neben Beförderungen auch **entity-übergreifende Referenzintegrität** zu wahren (siehe nächster Abschnitt):
+
+```
+Phase 1 — Proposed Deletions berechnen:
+  Für jede GlobalId in jv_snapshot:
+    Alle Snapshots laden (aufsteigend nach Version)
+    Policy bestimmt: welche sollen gelöscht werden?
+
+Phase 2 — Referenz-Scan (Hybrid):
+  state-JSON aller verbleibenden Snapshots einlesen (Entities UND Value Objects)
+  {"entity": "...", "cdoId": ...}-Muster rekursiv extrahieren
+  → Map: globalIdPk → frühestes commitDate einer Referenz auf diese Entity
+
+Phase 3 — Anker-Rettung:
+  Für jede referenzierte Entity:
+    Liegt der älteste verbleibende Snapshot VOR dem frühesten Referenz-Datum?
+    Nein → neuesten Löschkandidaten mit commitDate ≤ Referenz-Datum retten
+
+Ausführung:
+  Für jede GlobalId mit nicht-leerem Deletion-Set:
+    Ältesten verbleibenden Snapshot prüfen:
+      Falls type = 'UPDATE' → zu INITIAL befördern
+      (Property-Namen via Javers CdoSnapshot API, nicht JSON-Parsing)
+    DELETE jv_snapshot WHERE snapshot_pk IN (...)
+
+Nach allen Durchläufen:
+  DELETE jv_commit_property für verwaiste Commits
+  DELETE jv_commit für verwaiste Commits
+  DELETE jv_global_id (Kinder zuerst, dann Eltern)
+```
+
+### Referenzintegrität bei Entity-Verweisen
+
+Javers speichert Entity-Referenzen (z.B. `@ManyToOne`) nicht als Fremdschlüssel auf Snapshots, sondern als JSON-Referenz im `state`-Feld:
+
+```json
+{ "customer": { "entity": "de.example.Customer", "cdoId": 5 } }
+```
+
+**Das Problem ohne Schutz:** Wenn `Order v1` zum Zeitpunkt T erstellt wurde, als `Customer v1` der aktuelle Zustand war, und die Policy danach `Customer v1` löscht (weil neuere Snapshots existieren), liefert Javers bei einer historischen Abfrage zu Zeitpunkt T den falschen oder gar keinen Customer-Zustand.
+
+**Die Lösung (Hybrid-Ansatz):** Phase 2 scannt die `state`-JSON **aller** behaltenen Snapshots — sowohl von Entities als auch von Value Objects (z.B. `@Embeddable`-Typen mit `@ManyToOne`-Feldern) — und ermittelt pro referenzierter Entity das früheste Datum, an dem eine Referenz auf sie besteht. Phase 3 stellt sicher, dass jede referenzierte Entity mindestens einen Snapshot mit `commitDate ≤ diesem Datum` behält — nötigenfalls durch Rettung eines sonst gelöschten Snapshots.
+
+**Bekannte Einschränkung:** Es werden nur direkte Referenzen geschützt. Kaskaden (A → B → C) werden nicht automatisch aufgelöst.
+
+### API
+
+```java
+// count-basiert: genau N neueste Snapshots pro Entity behalten
+CleanupPolicy.keepLatest(int count)
+
+// zeitbasiert: Snapshots älter als N Tage löschen, mind. minKeep behalten
+CleanupPolicy.olderThan(int days, int minKeep)
+
+// Ergebnis
+record CleanupResult(
+    int promotedSnapshots,   // UPDATE → INITIAL Beförderungen
+    int deletedSnapshots,
+    int deletedCommits,
+    int rescuedSnapshots     // Anker-Rettungen für Referenzintegrität
+)
+```
+
+**`olderThan` — Zusammenspiel von `days` und `minKeep`:**  
+`minKeep` wirkt als absolute Untergrenze, unabhängig vom Alter. Selbst wenn alle 10 Snapshots einer Entity älter als `days` Tage sind, werden die `minKeep` neuesten immer behalten. Beispiel: `olderThan(90, 5)` löscht bei 10 Snapshots maximal 5 — auch wenn alle 10 das Alterslimit überschreiten.
+
+**Wann welche Policy?**
+
+| Szenario | Empfehlung |
+|---|---|
+| Entwicklung / Tests: wenige, aktuelle Einträge behalten | `keepLatest(5)` |
+| Produktion: rollierendes Zeitfenster mit Mindestbestand | `olderThan(180, 1)` |
+| Regulatorisch: exaktes Ablaufdatum + Sicherheitspuffer | `olderThan(365, 3)` |
+
+### `findChanges()` nach einem Cleanup
+
+Nach einer Beförderung (UPDATE → INITIAL) liefert `javers.findChanges()` für die bereinigte Entity **drei Änderungstypen**:
+
+| Typ | Bedeutung |
+|---|---|
+| `NewObject` | Entity "erstellt" am beförderten INITIAL-Snapshot |
+| `InitialValueChange` | Eigenschaftswerte zum Zeitpunkt des beförderten INITIAL |
+| `ValueChange` | Tatsächliche Änderungen zwischen aufeinanderfolgenden Snapshots |
+
+Für die Filterung im eigenen Code: `ch.getClass() == ValueChange.class` schließt `InitialValueChange` (Subtyp) aus und liefert nur die echten Update-Diffs.
+
+### Scheduled-Cleanup einrichten
+
+```java
+@Component
+public class JaversCleanupJob {
+
+    private final JaversCleanupService cleanupService;
+
+    @Scheduled(cron = "0 0 2 * * SUN")  // jeden Sonntag um 02:00 Uhr
+    public void run() {
+        CleanupResult result = cleanupService.cleanup(
+            CleanupPolicy.olderThan(180, 1)
+        );
+        log.info("Javers cleanup: {}", result);
+    }
+}
+```
+
+### Wichtige Hinweise
+
+- Der Service läuft in einer einzigen Transaktion pro `cleanup()`-Aufruf. Bei sehr großen Tabellen (Millionen Snapshots) sollte die Policy entsprechend eingeschränkt und der Job regelmäßig ausgeführt werden, um riesige Transaktionen zu vermeiden.
+- Nach einem Cleanup sollte die Javers-Anwendung neu gestartet werden, falls ein interner Snapshot-Cache konfiguriert ist (`CachingJaversRepository`).
+- `TERMINAL`-Snapshots (gelöschte Entities) werden nie zu INITIAL befördert.
+- Die `jv_global_id`-Bereinigung am Ende jedes Cleanup-Laufs entfernt **alle** verwaisten Einträge — nicht nur die durch diesen Cleanup erzeugten, sondern auch solche aus externen Datenmanipulationen oder Teilmigrationen. Das ist ein nützlicher Nebeneffekt, der die Datenbank konsistent hält.
+
+### Javers 7.11.x Schema
+
+Die Spaltennamen haben sich gegenüber älteren Versionen geändert:
+
+| Tabelle | PK-Spalte |
+|---|---|
+| `jv_snapshot` | `snapshot_pk` (früher: `id`) |
+| `jv_commit` | `commit_pk` (früher: `id`) |
+| `jv_global_id` | `global_id_pk` (früher: `id`) |

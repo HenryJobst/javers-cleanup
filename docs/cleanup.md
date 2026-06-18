@@ -53,7 +53,7 @@ Phase 1 — Proposed Deletions berechnen:
     Policy bestimmt: welche sollen gelöscht werden?
 
 Phase 2 — Referenz-Scan (Hybrid):
-  state-JSON aller verbleibenden (nicht-VO) Snapshots einlesen
+  state-JSON aller verbleibenden Snapshots einlesen (Entities UND Value Objects)
   {"entity": "...", "cdoId": ...}-Muster rekursiv extrahieren
   → Map: globalIdPk → frühestes commitDate einer Referenz auf diese Entity
 
@@ -85,7 +85,7 @@ Javers speichert Entity-Referenzen (z.B. `@ManyToOne`) nicht als Fremdschlüssel
 
 **Das Problem ohne Schutz:** Wenn `Order v1` zum Zeitpunkt T erstellt wurde, als `Customer v1` der aktuelle Zustand war, und die Policy danach `Customer v1` löscht (weil neuere Snapshots existieren), liefert Javers bei einer historischen Abfrage zu Zeitpunkt T den falschen oder gar keinen Customer-Zustand.
 
-**Die Lösung (Hybrid-Ansatz):** Phase 2 scannt die `state`-JSON aller behaltenen Snapshots und ermittelt pro referenzierter Entity das früheste Datum, an dem eine Referenz auf sie besteht. Phase 3 stellt sicher, dass jede referenzierte Entity mindestens einen Snapshot mit `commitDate ≤ diesem Datum` behält — nötigenfalls durch Rettung eines sonst gelöschten Snapshots.
+**Die Lösung (Hybrid-Ansatz):** Phase 2 scannt die `state`-JSON **aller** behaltenen Snapshots — sowohl von Entities als auch von Value Objects (z.B. `@Embeddable`-Typen mit `@ManyToOne`-Feldern) — und ermittelt pro referenzierter Entity das früheste Datum, an dem eine Referenz auf sie besteht. Phase 3 stellt sicher, dass jede referenzierte Entity mindestens einen Snapshot mit `commitDate ≤ diesem Datum` behält — nötigenfalls durch Rettung eines sonst gelöschten Snapshots.
 
 **Bekannte Einschränkung:** Es werden nur direkte Referenzen geschützt. Kaskaden (A → B → C) werden nicht automatisch aufgelöst.
 
@@ -218,7 +218,7 @@ Phase 1 — Compute proposed deletions:
     Policy selects: which ones should be deleted?
 
 Phase 2 — Reference scan (hybrid):
-  Read the state JSON of all retained (non-VO) snapshots
+  Read the state JSON of all retained snapshots (entities AND Value Objects)
   Recursively extract {"entity": "...", "cdoId": ...} patterns
   → Map: globalIdPk → earliest commitDate of any reference to that entity
 
@@ -250,7 +250,7 @@ Javers stores entity references (e.g. `@ManyToOne`) not as foreign keys to snaps
 
 **The problem without protection:** If `Order v1` was created at time T when `Customer v1` was the current state, and the policy later deletes `Customer v1` (because newer snapshots exist), Javers returns the wrong or no customer state when queried historically at time T.
 
-**The solution (hybrid approach):** Phase 2 scans the `state` JSON of all retained snapshots and determines, for each referenced entity, the earliest date at which a reference to it exists. Phase 3 ensures that every referenced entity retains at least one snapshot with `commitDate ≤ that date` — rescuing an otherwise-deleted snapshot if necessary.
+**The solution (hybrid approach):** Phase 2 scans the `state` JSON of **all** retained snapshots — both entities and Value Objects (e.g. `@Embeddable` types with `@ManyToOne` fields) — and determines, for each referenced entity, the earliest date at which a reference to it exists. Phase 3 ensures that every referenced entity retains at least one snapshot with `commitDate ≤ that date` — rescuing an otherwise-deleted snapshot if necessary.
 
 **Known limitation:** Only direct references are protected. Cascades (A → B → C) are not automatically resolved.
 

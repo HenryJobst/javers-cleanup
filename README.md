@@ -41,6 +41,7 @@ src/main/java/de/tsboj/javerscleanup/
 │   ├── CleanupResult.java           # Ergebnis-Record
 │   ├── JaversMigrationService.java  # Retroaktive Snapshot-Erstellung
 │   ├── MigrationResult.java         # Ergebnis-Record
+│   ├── SnapshotPromoter.java        # Gemeinsamer Helper für Snapshot-Beförderung (package-private)
 │   └── SnapshotRow.java             # Internes JDBC-DTO (package-private)
 └── demo/
     ├── Customer.java                # Beispiel-Entity
@@ -79,6 +80,7 @@ Copy the entire `cleanup` package into the target application and adjust the pac
 CleanupPolicy.java
 CleanupResult.java
 JaversCleanupService.java
+SnapshotPromoter.java     ← package-private, muss im selben Paket bleiben
 SnapshotRow.java          ← package-private, muss im selben Paket bleiben
 ```
 
@@ -86,6 +88,7 @@ SnapshotRow.java          ← package-private, muss im selben Paket bleiben
 ```
 JaversMigrationService.java
 MigrationResult.java
+SnapshotPromoter.java     ← package-private, muss im selben Paket bleiben
 SnapshotRow.java          ← package-private, muss im selben Paket bleiben
 ```
 
@@ -96,6 +99,7 @@ CleanupResult.java
 JaversCleanupService.java
 JaversMigrationService.java
 MigrationResult.java
+SnapshotPromoter.java
 SnapshotRow.java
 ```
 
@@ -123,11 +127,11 @@ SnapshotRow.java
 </dependency>
 ```
 
-### Hinweis zu `SnapshotRow` / Note on `SnapshotRow`
+### Hinweis zu package-privaten Klassen / Note on package-private classes
 
-`SnapshotRow` ist `package-private` und dient als internes JDBC-DTO. Beide Services müssen sich im **selben Java-Paket** befinden. Empfehlung: alle Klassen in ein dediziertes Paket wie `com.example.javers.maintenance` legen.
+`SnapshotRow` und `SnapshotPromoter` sind `package-private`. Beide Services müssen sich daher im **selben Java-Paket** befinden. Empfehlung: alle Klassen in ein dediziertes Paket wie `com.example.javers.maintenance` legen.
 
-`SnapshotRow` is `package-private` and serves as an internal JDBC DTO. Both services must reside in the **same Java package**. Recommendation: place all classes in a dedicated package such as `com.example.javers.maintenance`.
+`SnapshotRow` and `SnapshotPromoter` are `package-private`. Both services must therefore reside in the **same Java package**. Recommendation: place all classes in a dedicated package such as `com.example.javers.maintenance`.
 
 ---
 

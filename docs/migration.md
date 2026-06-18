@@ -68,7 +68,7 @@ MigrationResult result = migrationService.commitAllAt(
    - Nein → `INITIAL` mit aktuellem Zustand
    - Ja, Zustand geändert → `UPDATE` mit Diff
    - Ja, Zustand unverändert → kein neuer Snapshot
-3. **Korrektur fehlender INITIAL:** alle neu erstellten Snapshots prüfen — falls der älteste Snapshot einer GlobalId `UPDATE` ist (kein vorheriger Snapshot in der gesamten Kette), wird er zu `INITIAL` befördert (analog zu `JaversCleanupService`)
+3. **Korrektur fehlender INITIAL:** alle neu erstellten Snapshots prüfen — falls der älteste Snapshot einer GlobalId `UPDATE` ist (kein vorheriger Snapshot in der gesamten Kette), wird er zu `INITIAL` befördert (analog zu `JaversCleanupService`). `newInitialSnapshots` und `newUpdateSnapshots` im Ergebnis zählen nur Entity-Snapshots; Value-Object-Snapshots (z.B. für `@Embeddable`-Felder) werden von Javers automatisch miterstellt, aber nicht separat ausgewiesen.
 4. Optional: alle neuen `jv_commit`-Einträge auf den Migrationszeitstempel setzen
 
 ### Backdating (historischer Zeitstempel)
@@ -94,8 +94,8 @@ Beide Spalten werden aktualisiert (`commit_date` als SQL-Timestamp, `commit_date
 
 // Ergebnis
 record MigrationResult(
-    int newInitialSnapshots,   // neue INITIAL-Snapshots (neue Entitäten)
-    int newUpdateSnapshots,    // neue UPDATE-Snapshots (bestehende, geänderte Entitäten)
+    int newInitialSnapshots,   // neue Entity-INITIAL-Snapshots (VO-Snapshots nicht mitgezählt)
+    int newUpdateSnapshots,    // neue Entity-UPDATE-Snapshots (VO-Snapshots nicht mitgezählt)
     int unchangedEntities,     // unveränderte Entitäten (kein neuer Snapshot)
     int correctedToInitial     // UPDATE→INITIAL-Korrekturen (fehlende INITIAL in Kette)
 )
@@ -219,7 +219,7 @@ MigrationResult result = migrationService.commitAllAt(
    - No → `INITIAL` with current state
    - Yes, state changed → `UPDATE` with diff
    - Yes, state unchanged → no new snapshot
-3. **Correction for missing INITIAL:** inspect all newly created snapshots — if the oldest snapshot of a GlobalId is `UPDATE` (no preceding snapshot exists in the entire chain), promote it to `INITIAL` (same mechanism as `JaversCleanupService`)
+3. **Correction for missing INITIAL:** inspect all newly created snapshots — if the oldest snapshot of a GlobalId is `UPDATE` (no preceding snapshot exists in the entire chain), promote it to `INITIAL` (same mechanism as `JaversCleanupService`). `newInitialSnapshots` and `newUpdateSnapshots` in the result count entity-level snapshots only; Value Object snapshots (e.g. for `@Embeddable` fields) are created automatically by Javers but are not reported separately.
 4. Optionally: set all new `jv_commit` entries to the migration timestamp
 
 ### Backdating (historical timestamp)
@@ -245,9 +245,9 @@ Both columns are updated (`commit_date` as SQL timestamp, `commit_date_instant` 
 
 // Result
 record MigrationResult(
-    int newInitialSnapshots,   // new INITIAL snapshots (new entities)
-    int newUpdateSnapshots,    // new UPDATE snapshots (existing, changed entities)
-    int unchangedEntities,     // unchanged entities (no new snapshot)
+    int newInitialSnapshots,   // new entity-level INITIAL snapshots (VO snapshots not counted)
+    int newUpdateSnapshots,    // new entity-level UPDATE snapshots (VO snapshots not counted)
+    int unchangedEntities,     // unchanged entities (no new snapshot created)
     int correctedToInitial     // UPDATE→INITIAL corrections (missing INITIAL in chain)
 )
 ```

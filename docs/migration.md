@@ -47,6 +47,8 @@ Javers correctly creates `INITIAL` when **no** snapshots exist at all (including
 
 ### Solution: `JaversMigrationService`
 
+Add the starter to your project (see [README](../README.md#installation)), then inject the auto-configured bean:
+
 ```java
 @Autowired
 JaversMigrationService migrationService;
@@ -197,6 +199,8 @@ Javers erstellt korrekt `INITIAL` wenn **gar keine** Snapshots existieren (auch 
 **Kritisch:** Schritt 2 muss **vor** der ersten Javers-aktivierten Änderung erfolgen. Andernfalls erstellt Javers beim ersten `save()` ein `INITIAL` mit dem geänderten Zustand — der Originalzustand ist unwiederbringlich verloren.
 
 ### Lösung: `JaversMigrationService`
+
+Starter einbinden (siehe [README](../README.md#installation-1)), dann den auto-konfigurierten Bean injecten:
 
 ```java
 @Autowired

@@ -33,6 +33,8 @@ Only then does Javers correctly interpret that snapshot as a complete initial cr
 
 ### Solution: `JaversCleanupService`
 
+Add the starter to your project (see [README](../README.md#installation)), then inject the auto-configured bean:
+
 ```java
 @Autowired
 JaversCleanupService cleanupService;
@@ -88,7 +90,7 @@ After all passes:
 Javers stores entity references (e.g. `@ManyToOne`) not as foreign keys to snapshots, but as a JSON reference inside the `state` field:
 
 ```json
-{ "customer": { "entity": "de.example.Customer", "cdoId": 5 } }
+{ "customer": { "entity": "com.example.Customer", "cdoId": 5 } }
 ```
 
 **The problem without protection:** If `Order v1` was created at time T when `Customer v1` was the current state, and the policy later deletes `Customer v1` (because newer snapshots exist), Javers returns the wrong or no customer state when queried historically at time T.
@@ -218,6 +220,8 @@ Nur so interpretiert Javers diesen Snapshot korrekt als vollständige Erstanlage
 
 ### Lösung: `JaversCleanupService`
 
+Starter einbinden (siehe [README](../README.md#installation-1)), dann den auto-konfigurierten Bean injecten:
+
 ```java
 @Autowired
 JaversCleanupService cleanupService;
@@ -273,7 +277,7 @@ Nach allen Durchläufen:
 Javers speichert Entity-Referenzen (z.B. `@ManyToOne`) nicht als Fremdschlüssel auf Snapshots, sondern als JSON-Referenz im `state`-Feld:
 
 ```json
-{ "customer": { "entity": "de.example.Customer", "cdoId": 5 } }
+{ "customer": { "entity": "com.example.Customer", "cdoId": 5 } }
 ```
 
 **Das Problem ohne Schutz:** Wenn `Order v1` zum Zeitpunkt T erstellt wurde, als `Customer v1` der aktuelle Zustand war, und die Policy danach `Customer v1` löscht (weil neuere Snapshots existieren), liefert Javers bei einer historischen Abfrage zu Zeitpunkt T den falschen oder gar keinen Customer-Zustand.

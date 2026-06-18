@@ -525,6 +525,56 @@ abstract class AbstractJaversCleanupServiceTest {
     }
 
     // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Behavior 9: Phase 4 version-gap fill
+    // -------------------------------------------------------------------------
+
+    @Test
+    void gap_fill_rescues_all_versions_spanning_a_wide_gap() {
+        // Customer: v1(anchor) ← v2, v3 (wide gap) ← v4, v5 (kept by policy)
+        // keepLatest(2): proposed toDelete = [v1, v2, v3], keep [v4, v5].
+        // Phase 3: rescue v1 (Order references Customer at v1 state).
+        // Phase 4: retained = [v1, v4, v5]; gap between v1 (version=1) and v4 (version=4)
+        //           spans v2 (version=2) and v3 (version=3) → rescue both.
+        // Result: rescued=3, deleted=0, all 5 versions kept.
+        Customer customer = repo.save(new Customer("Wide", "wide@test.de", "0", "Berlin")); // v1
+        orderRepo.save(new Order("ORD-WIDE", customer, "PENDING")); // refs Customer@v1
+        customer.setCity("Munich");    customer = repo.save(customer); // v2
+        customer.setCity("Hamburg");   customer = repo.save(customer); // v3
+        customer.setCity("Frankfurt"); customer = repo.save(customer); // v4
+        customer.setCity("Stuttgart"); customer = repo.save(customer); // v5
+
+        CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(2));
+
+        assertThat(result.rescuedSnapshots()).isEqualTo(3); // v1 (ref) + v2+v3 (gap)
+        assertThat(result.deletedSnapshots()).isEqualTo(0);
+        assertThat(snapshotCount(customer)).isEqualTo(5);
+
+        // With all 5 versions intact and no gap, findChanges must not throw.
+        Customer finalCustomer = customer;
+        assertThatNoException().isThrownBy(
+                () -> javers.findChanges(QueryBuilder.byInstance(finalCustomer).build()));
+    }
+
+    @Test
+    void gap_fill_has_no_effect_when_standard_cleanup_deletes_only_from_the_head() {
+        // keepLatest(2) deletes v1+v2 and promotes v3 to INITIAL.
+        // No reference protection → no anchor rescue → no version gap possible.
+        // rescuedSnapshots must be 0 (gap fill is a no-op).
+        Customer customer = createCustomerWithSnapshots(4); // v1(I), v2(U), v3(U), v4(U)
+
+        CleanupResult result = cleanupService.cleanup(CleanupPolicy.keepLatest(2));
+
+        assertThat(result.rescuedSnapshots()).isEqualTo(0);
+        assertThat(result.deletedSnapshots()).isEqualTo(2); // v1 + v2
+        assertThat(snapshotCount(customer)).isEqualTo(2);  // v3 (INITIAL) + v4
+
+        // findChanges on the resulting [v3(INITIAL), v4(UPDATE)] chain must work.
+        assertThatNoException().isThrownBy(
+                () -> javers.findChanges(QueryBuilder.byInstance(customer).build()));
+    }
+
+    // -------------------------------------------------------------------------
     // Helper methods
     // -------------------------------------------------------------------------
 
